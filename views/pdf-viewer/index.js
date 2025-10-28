@@ -130,6 +130,7 @@
         } else {
             backupPdfViewerState();
         }
+        PDFViewerApplication.isViewerEmbedded = true;
         PDFViewerApplication.load(doc);
     }
 
