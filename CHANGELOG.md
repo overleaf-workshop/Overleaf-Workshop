@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.6] - 2025-10-30
+### Changed
+- chore(deps): bump brace-expansion in /views/chat-view
+  - Commit: b780bb3401661d0a8ee3e62a64114f42b863cb5a
+- chore(deps): bump form-data from 4.0.0 to 4.0.4
+  - Commit: 23d0873004f3e08c6836d72bfd6fab0016f2574a
+- chore(deps-dev): bump vite from 6.3.5 to 6.3.6 in /views/chat-view
+  - Commit: 30e83b17cce3ebb78f79412a37b0fb9f0dc03c1c
+- chore(deps-dev): bump vite from 6.3.6 to 6.4.1 in /views/chat-view
+  - Commit: 2053c025373545c96d98277f8c61c4e54c9c376e
+
+### Fixed
+- fix: file rename
+  - Commit: 1018f4ba03238a6863b1ff2d863743731b9770b8
+- fix: mark isViewerEmbedded as true for pdfviewer to avoid unnecessary focus
+  - Commit: 15f19f2433fe841f6312270554d7b5b328155f19
+
 ## [0.15.5] - 2025-07-08
 ### Changed
 - feat: enable code spell checker by default
