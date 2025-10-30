@@ -2,17 +2,17 @@
   "name": "overleaf-workshop",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.15.5",
+  "version": "0.15.6",
   "icon": "resources/icons/app_icon.png",
   "author": {
     "name": "iamhyc",
-    "email": "sudofree@163.com"
+    "email": "ychong@petalmail.com"
   },
   "publisher": "iamhyc",
   "contributors": [
     {
       "name": "iamhyc",
-      "email": "sudofree@163.com",
+      "email": "ychong@petalmail.com",
       "url": "https://github.com/iamhyc"
     },
     {
