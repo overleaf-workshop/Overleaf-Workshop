@@ -4,6 +4,7 @@ import { ProjectTagsResponseSchema } from '../api/base';
 import { GlobalStateManager } from '../utils/globalStateManager';
 import { VirtualFileSystem, parseUri } from './remoteFileSystemProvider';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import { PhantomWebview } from '../utils/phantomWebview';
 
 class DataItem extends vscode.TreeItem {
     constructor(
@@ -209,60 +210,98 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
     }
 
     loginServer(server: ServerItem) {
-        const loginMethods:Record<string, ()=>void> = {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login with Password': () => {
-                vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Email')})
-                .then(email => email ? Promise.resolve(email) : Promise.reject())
-                .then(email =>
-                    vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Password'), 'password': true})
-                    .then(password => {
-                        return password ? Promise.resolve([email,password]) : Promise.reject();
+        const loginMethods = [
+            // login with webview
+            {
+                id: 'webview',
+                label: vscode.l10n.t('Login with Webview'),
+                disabled: false,
+                details: vscode.l10n.t(''),
+                callback: () => {
+                    const webview = new PhantomWebview(server.api.url);
+                    webview.onCookieUpdated((cookies) => {
+                        // 'overleaf_session2', 'sharelatex.sid'
+                        if (cookies['overleaf_session2'] || cookies['sharelatex.sid']) {
+                            const cookie = Object.entries(cookies).map(([key,value]) => `${key}=${value}`).join('; ');
+                            GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies:cookie})
+                            .then(success => {
+                                if (success) {
+                                    this.refresh();
+                                    webview.dispose();
+                                } else {
+                                    vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
+                                }
+                            });
+                        }
+                    });
+                },
+            },
+            // login with password
+            {
+                id: 'password',
+                label: vscode.l10n.t('Login with Email/Password'),
+                disabled: false,
+                details: vscode.l10n.t(''),
+                callback: () => {
+                    vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Email')})
+                    .then(email => email ? Promise.resolve(email) : Promise.reject())
+                    .then(email =>
+                        vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Password'), 'password': true})
+                        .then(password => {
+                            return password ? Promise.resolve([email,password]) : Promise.reject();
+                        })
+                    )
+                    .then(([email,password]) =>
+                        GlobalStateManager.loginServer(this.context, server.api, server.name, {email, password})
+                    )
+                    .then(success => {
+                        if (success) {
+                            this.refresh();
+                        } else {
+                            vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
+                        }
+                    });
+                },
+            },
+            {
+                id: 'cookies',
+                label: vscode.l10n.t('Login with Cookies'),
+                disabled: false,
+                details: vscode.l10n.t(''),
+                callback: () => {
+                    vscode.window.showInputBox({
+                        'placeHolder': vscode.l10n.t('Cookies, e.g., "sharelatex.sid=..." or "overleaf_session2=..."'),
+                        'prompt': vscode.l10n.t('README: [How to Login with Cookies](https://github.com/iamhyc/overleaf-workshop#how-to-login-with-cookies)'),
                     })
-                )
-                .then(([email,password]) =>
-                    GlobalStateManager.loginServer(this.context, server.api, server.name, {email, password})
-                )
-                .then(success => {
-                    if (success) {
-                        this.refresh();
-                    } else {
-                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
-                    }
-                });
+                    .then(cookies => cookies ? Promise.resolve(cookies) : Promise.reject())
+                    .then(cookies =>
+                        GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies})
+                    )
+                    .then(success => {
+                        if (success) {
+                            this.refresh();
+                        } else {
+                            vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
+                        }
+                    });
+                },
             },
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login with Cookies': () => {
-                vscode.window.showInputBox({
-                    'placeHolder': vscode.l10n.t('Cookies, e.g., "sharelatex.sid=..." or "overleaf_session2=..."'),
-                    'prompt': vscode.l10n.t('README: [How to Login with Cookies](https://github.com/iamhyc/overleaf-workshop#how-to-login-with-cookies)'),
-                })
-                .then(cookies => cookies ? Promise.resolve(cookies) : Promise.reject())
-                .then(cookies =>
-                    GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies})
-                )
-                .then(success => {
-                    if (success) {
-                        this.refresh();
-                    } else {
-                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
-                    }
-                });
-            },
-        };
+        ];
 
         //NOTE: temporarily disable password-based login for `www.overleaf.com`
         if (server.name==='www.overleaf.com') {
-            delete loginMethods['Login with Password'];
+            loginMethods.forEach(x => {
+                if (x.id==='password') { x.disabled = true; }
+            });
         }
 
-        vscode.window.showQuickPick(Object.keys(loginMethods), {
-            canPickMany:false, placeHolder:vscode.l10n.t('Select the login method below.')})
-        .then(selection => {
-            if (selection===undefined) { return Promise.reject(); }
-            return Promise.resolve( (loginMethods as any)[selection] );
-        })
-        .then(method => method());
+        vscode.window.showQuickPick(
+            loginMethods.filter(x => !x.disabled),
+            { placeHolder:vscode.l10n.t('Select the login method below.') }
+        ).then(selection => {
+            if (selection===undefined) { return; }
+            selection.callback();
+        });
     }
 
     logoutServer(server: ServerItem) {
