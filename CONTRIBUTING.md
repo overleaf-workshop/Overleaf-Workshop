@@ -8,11 +8,11 @@ In this document, we will mainly elaborate on how to make code contributions to 
 
 > [!WARNING]
 > We will not accept any pull request that is not associated with an issue.
-> If you have any question about the project, please create an issue or discuss it in the [Discussions](https://github.com/iamhyc/Overleaf-Workshop/discussions) section.
+> If you have any question about the project, please create an issue or discuss it in the [Discussions](https://github.com/overleaf-workshop/Overleaf-Workshop/discussions) section.
 
 To make a contribution to this project, please follow the steps below:
 
-1. Create or find an `Bug Report` or `Feature Request` issue on [GitHub](https://github.com/iamhyc/Overleaf-Workshop/issues).
+1. Create or find an `Bug Report` or `Feature Request` issue on [GitHub](https://github.com/overleaf-workshop/Overleaf-Workshop/issues).
    
    If you are creating a new issue, please make sure that it is not a duplicate of an existing issue.
 
@@ -49,7 +49,7 @@ To make a contribution to this project, please follow the steps below:
 
 ```bash
 # Clone the Repository and Change Directory
-git clone https://github.com/iamhyc/Overleaf-Workshop.git
+git clone https://github.com/overleaf-workshop/Overleaf-Workshop.git
 cd Overleaf-Workshop
 
 # Install `vsce` globally
@@ -71,4 +71,4 @@ In VSCode, press <kbd>F5</kbd> to start debugging. A new VSCode window will be o
 
 ### Documentation
 - [VSCode Extension API](https://code.visualstudio.com/api/references/vscode-api)
-- [Overleaf Workshop Extension Documentation](https://github.com/iamhyc/Overleaf-Workshop/tree/master/docs/README.md)
+- [Overleaf Workshop Extension Documentation](https://github.com/overleaf-workshop/Overleaf-Workshop/tree/master/docs/README.md)

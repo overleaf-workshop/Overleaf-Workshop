@@ -117,7 +117,7 @@ The exported `class ExtendedBaseAPI` extends the `class BaseAPI` with extra feat
 The implementation of `socket.io-client`-based websocket API used by overleaf server.
 The implementation is carried out by observation of raw websocket messages via browser developer tools, and is loosely coupled with the extension for reuse in other projects.
 
-There are currently two versions of `socketio` API is supported:`v1` for relative old versions, `v2` for `overleaf.com` (maybe a newer version, mentioned in [this issue](https://github.com/iamhyc/Overleaf-Workshop/issues/42)).
+There are currently two versions of `socketio` API is supported:`v1` for relative old versions, `v2` for `overleaf.com` (maybe a newer version, mentioned in [this issue](https://github.com/overleaf-workshop/Overleaf-Workshop/issues/42)).
 The only difference exists in the handshake phase: whether the `projectId` parameter should be passed.
 
 **Interfaces**
@@ -170,7 +170,7 @@ The standalone module for online users and chat message functions.
 
 #### `src/collaboration/clientManager.ts`
 The export `class ClientManager` exposes features to vscode via `(get) triggers` with:
-> Notice that it ties to `this.socket.updateEventHandlers` in its constructor, which may cause memory leak even when all triggers are disposed ([related issue #51](https://github.com/iamhyc/Overleaf-Workshop/issues/51))
+> Notice that it ties to `this.socket.updateEventHandlers` in its constructor, which may cause memory leak even when all triggers are disposed ([related issue #51](https://github.com/overleaf-workshop/Overleaf-Workshop/issues/51))
 - **StatusBarItem**
   - **Tooltip**: hover the item displays the client connection status, online user status (inactive time, cursor position) periodically (500ms) refreshed in `this.updateStatus` function.
   - **Settings**: click the item to display project-dependent settings defined in `this.collaborationSettings`

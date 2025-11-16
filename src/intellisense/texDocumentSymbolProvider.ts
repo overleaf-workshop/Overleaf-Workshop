@@ -58,7 +58,7 @@ function elementsToFoldingRanges(sections: TeXElement[]): vscode.FoldingRange[] 
     return foldingRanges;
 }
 
-// Reference: https://github.com/iamhyc/LaTeX-Workshop/commit/d1a078d9b63a34c9cda9ff5d1042c8999030e6e1
+// Reference: https://github.com/James-Yu/LaTeX-Workshop/commit/d1a078d9b63a34c9cda9ff5d1042c8999030e6e1
 function getEnvironmentFoldingRange(document: vscode.TextDocument){
     const ranges: vscode.FoldingRange[] = [];
     const opStack: { keyword: string, index: number }[] = [];

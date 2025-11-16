@@ -235,7 +235,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
             'Login with Cookies': () => {
                 vscode.window.showInputBox({
                     'placeHolder': vscode.l10n.t('Cookies, e.g., "sharelatex.sid=..." or "overleaf_session2=..."'),
-                    'prompt': vscode.l10n.t('README: [How to Login with Cookies](https://github.com/iamhyc/overleaf-workshop#how-to-login-with-cookies)'),
+                    'prompt': vscode.l10n.t('README: [How to Login with Cookies](https://github.com/overleaf-workshop/overleaf-workshop#how-to-login-with-cookies)'),
                 })
                 .then(cookies => cookies ? Promise.resolve(cookies) : Promise.reject())
                 .then(cookies =>
