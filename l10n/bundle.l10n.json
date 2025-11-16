@@ -54,7 +54,7 @@
   "Password": "Password",
   "Login failed.": "Login failed.",
   "Cookies, e.g., \"sharelatex.sid=...\" or \"overleaf_session2=...\"": "Cookies, e.g., \"sharelatex.sid=...\" or \"overleaf_session2=...\"",
-  "README: [How to Login with Cookies](https://github.com/iamhyc/overleaf-workshop#how-to-login-with-cookies)": "README: [How to Login with Cookies](https://github.com/iamhyc/overleaf-workshop#how-to-login-with-cookies)",
+  "README: [How to Login with Cookies](https://github.com/overleaf-workshop/overleaf-workshop#how-to-login-with-cookies)": "README: [How to Login with Cookies](https://github.com/overleaf-workshop/overleaf-workshop#how-to-login-with-cookies)",
   "Select the login method below.": "Select the login method below.",
   "Logout server \"{name}\" ?": "Logout server \"{name}\" ?",
   "Blank Project": "Blank Project",

@@ -35,10 +35,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/iamhyc/overleaf-workshop"
+    "url": "https://github.com/overleaf-workshop/overleaf-workshop"
   },
   "bugs": {
-    "url": "https://github.com/iamhyc/overleaf-workshop/issues"
+    "url": "https://github.com/overleaf-workshop/overleaf-workshop/issues"
   },
   "engines": {
     "vscode": "^1.80.0"

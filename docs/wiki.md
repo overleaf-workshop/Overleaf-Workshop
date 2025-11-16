@@ -141,7 +141,7 @@ However, due to the [limitation of the virtual workspace](https://github.com/mic
 > [!NOTE]
 > The Overleaf features are not completely enabled in a local folder. Specifically, the [compile](#compile-project), [PDF preview](#preview-document), [intellisense](#intellisense) and [project history](#history-of-changes) features are disabled by default.
 > 
-> Currently, there is no way to enable these features in a local folder, especially considering people would like to use the LaTeX Workshop extension in a local folder. If you are in demand of these features, please consider to create a discussion in the [GitHub Discussions](https://github.com/iamhyc/Overleaf-Workshop/discussions)
+> Currently, there is no way to enable these features in a local folder, especially considering people would like to use the LaTeX Workshop extension in a local folder. If you are in demand of these features, please consider to create a discussion in the [GitHub Discussions](https://github.com/overleaf-workshop/Overleaf-Workshop/discussions)
 
 The "Open Project Locally" feature is provided via a [local replica](#local-replica). The local replica is a folder on your local machine with a `.overleaf` folder presence, which is kept in sync with the project on the Overleaf server.
 
@@ -374,7 +374,7 @@ The available commands and default shortcuts can be found in the command palette
 - **"Set Compiler"**: This command is used to change the compiler of the current project.
 - **"Set Root Document"**: This command is used to change the root document to be compiled of the current project.
 
-Let us know if you have any suggestions for the commands and shortcuts in the [GitHub Discussions](https://github.com/iamhyc/Overleaf-Workshop/discussions).
+Let us know if you have any suggestions for the commands and shortcuts in the [GitHub Discussions](https://github.com/overleaf-workshop/Overleaf-Workshop/discussions).
 
 ### Configurations
 
@@ -425,4 +425,4 @@ Please notice that not all Overleaf features enabled in a local folder. More spe
 - Enable/Disable the network proxy for VS Code (or the Overleaf server domain) globally.
 - Try [Invisible Mode](#invisible-mode), which does not use WebSocket to communicate with the server.
 
-If the above solutions do not work, please consider to create a bug report in the [GitHub Issues](https://github.com/iamhyc/Overleaf-Workshop/issues/new/choose).
+If the above solutions do not work, please consider to create a bug report in the [GitHub Issues](https://github.com/overleaf-workshop/Overleaf-Workshop/issues/new/choose).
