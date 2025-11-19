@@ -1,36 +1,74 @@
 name: Publish Extension
 permissions:
   contents: read
+
 on:
-  push:
-    branches: [master]
+  schedule:
+    - cron: '0 0 * * *'  # every day at 00:00 UTC
+  workflow_dispatch: {}  # allow manual runs
 
 jobs:
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
+    - name: Checkout code (last 2 commits)
       uses: actions/checkout@v4
       with:
-        ref: ${{ github.ref }}
+        ref: refs/heads/master
+        fetch-depth: 2
+
+    - name: Determine if package.json changed in the last commit
+      id: pkg_changed
+      run: |
+        # if there is a previous commit available (fetch-depth:2 gives HEAD~1), diff only the root package.json
+        if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- package.json || true)
+        else
+          # fallback: list top-level files only (no -r) and match exact 'package.json' to avoid subfolder matches
+          CHANGED=$(git ls-tree --name-only HEAD | grep -x 'package.json' || true)
+        fi
+        if [ -n "$CHANGED" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: Setup Node.js
+      if: steps.pkg_changed.outputs.changed == 'true'
       uses: actions/setup-node@v4
       with:
         node-version: '20'
 
     - name: Install dependencies
+      if: steps.pkg_changed.outputs.changed == 'true'
       run: | 
           npm install
           cd views/chat-view
           npm install
 
     - name: Install vsce
+      if: steps.pkg_changed.outputs.changed == 'true'
       run: npm install -g vsce
 
-    - name: Publish
+    - name: Package extension (.vsix)
+      if: steps.pkg_changed.outputs.changed == 'true'
+      run: |
+        vsce package
+
+    - name: Publish to VS Code Marketplace
+      if: steps.pkg_changed.outputs.changed == 'true'
       env:
         VSCE_PAT: ${{ secrets.VSCE_PAT }}
       run: vsce publish -p $VSCE_PAT
+    
+    - name: Install ovsx
+      if: steps.pkg_changed.outputs.changed == 'true'
+      run: npm install -g ovsx
+
+    - name: Publish to Open VSX
+      if: steps.pkg_changed.outputs.changed == 'true'
+      env:
+        OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+      run: |
+        ovsx publish *.vsix --pat $OVSX_TOKEN
