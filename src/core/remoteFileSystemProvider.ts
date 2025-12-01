@@ -8,7 +8,7 @@ import { GlobalStateManager } from '../utils/globalStateManager';
 import { ClientManager } from '../collaboration/clientManager';
 import { EventBus } from '../utils/eventBus';
 import { SCMCollectionProvider } from '../scm/scmCollectionProvider';
-import { ExtendedBaseAPI, ProjectLinkedFileProvider, UrlLinkedFileProvider } from '../api/extendedBase';
+import { DocumentRangesSchema, DocumentReviewChangeSchema, ExtendedBaseAPI, ProjectLinkedFileProvider, UrlLinkedFileProvider } from '../api/extendedBase';
 
 const __OUTPUTS_ID = `${ROOT_NAME}-outputs`;
 
@@ -34,6 +34,7 @@ export interface DocumentEntity extends FileEntity {
     lastVersion?: number,
     localCache?: string,
     remoteCache?: string,
+    ranges?: DocumentRangesSchema,
 }
 
 export interface FileRefEntity extends FileEntity {
@@ -72,6 +73,7 @@ export interface ProjectEntity {
     invites: Array<MemberEntity>,
     owner: MemberEntity,
     features: {[key:string]:any},
+    trackChangesState: boolean | {[userId:string]:boolean},
     settings: ProjectSettingsSchema,
 }
 
@@ -104,6 +106,24 @@ export function parseUri(uri: vscode.Uri) {
     const pathParts = _pathParts.splice(2);
     const identifier = `${userId}/${projectId}/${projectName}`;
     return {userId, projectId, serverName, projectName, identifier, pathParts};
+}
+
+// Reference: https://github.com/overleaf/overleaf/blob/cc58fd3d1d1964a13cb677f7c288748894963163/libraries/ranges-tracker/index.cjs#L74
+export function generateTrackId(date: number = 0, offset: number = 1) {
+    // Generate a the first 18 characters of Mongo ObjectId, leaving 6 for the increment part
+    // Reference: https://github.com/dreampulse/ObjectId.js/blob/master/src/main/javascript/Objectid.js
+    const pid = Math.floor(Math.random() * 32767).toString(16);
+    const machine = Math.floor(Math.random() * 16777216).toString(16);
+    const timestamp = Math.floor((date || new Date().valueOf()) / 1000).toString(16);
+    const prefix = '00000000'.substr(0, 8 - timestamp.length) +
+                    timestamp +
+                    '000000'.substr(0, 6 - machine.length) +
+                    machine +
+                    '0000'.substr(0, 4 - pid.length) +
+                    pid;
+    if (offset===0) { return prefix; }
+    const index = offset.toString().padStart(6,'0');
+    return prefix + index;
 }
 
 export class VirtualFileSystem extends vscode.Disposable {
@@ -160,6 +180,25 @@ export class VirtualFileSystem extends vscode.Disposable {
 
     get _userId() {
         return this.userId;
+    }
+
+    get trackChangesState() {
+        const state = this.root?.trackChangesState;
+        if (typeof state==='object') {
+            return state[this._userId]===true;
+        } else {
+            return state===true;
+        }
+    }
+
+    set trackChangesState(enabling:boolean) {
+        const state = this.root!.trackChangesState;
+        if (typeof state==='object') {
+            state[this._userId] = enabling;
+        } else {
+            this.root!.trackChangesState = enabling;
+        }
+        this.toggleTrackChanges(this.root!.trackChangesState);
     }
 
     async init() : Promise<ProjectEntity> {
@@ -468,6 +507,12 @@ export class VirtualFileSystem extends vscode.Disposable {
                 //     EventBus.fire('rootDocUpdateEvent', {rootDocId});
                 // }
             },
+            onToggleTrackChanges: (enabling:boolean | {[userId:string]: boolean}) => {
+                if (this.root) {
+                    this.root.trackChangesState = enabling;
+                    EventBus.fire('trackChangesStateUpdateEvent', {enabling});
+                }
+            },
         });
     }
 
@@ -522,9 +567,10 @@ export class VirtualFileSystem extends vscode.Disposable {
                 EventBus.fire('fileWillOpenEvent', {uri});
                 return new TextEncoder().encode(content);
             } else {
-                const res = await this.socket.joinDoc(fileEntity._id);
-                const content = res.docLines.join('\n');
-                doc.version = res.version;
+                const {docLines,version,ranges} = await this.socket.joinDoc(fileEntity._id);
+                doc.version = version;
+                doc.ranges  = ranges;
+                const content = docLines.join('\n');
                 doc.remoteCache = content;
                 doc.localCache  = content;
                 EventBus.fire('fileWillOpenEvent', {uri});
@@ -759,6 +805,18 @@ export class VirtualFileSystem extends vscode.Disposable {
                         ).digest('hex');
                     }
                 })() as string,
+                meta: (()=>{
+                    if (this.trackChangesState) {
+                        return {
+                            source: this.publicId!,
+                            ts: Date.now(),
+                            user_id: this._userId,
+                            tc: generateTrackId(0, 0),
+                        };
+                    } else {
+                        return undefined;
+                    }
+                })(),
                 op: (()=>{
                     const remoteCacheAscii = Buffer.from(doc.remoteCache, 'utf-8').toString('utf-8');
                     const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
@@ -1196,6 +1254,90 @@ export class VirtualFileSystem extends vscode.Disposable {
         } else {
             return false;
         }
+    }
+
+    async getAllDocumentReviews() {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        // get all document ranges and threads
+        const rangesRes = await (this.api as ExtendedBaseAPI).getAllDocumentRanges(identity, this.projectId);
+        if  (rangesRes.type==='success') {
+            const threadsRes = await (this.api as ExtendedBaseAPI).getAllCommentThreads(identity, this.projectId);
+            if (threadsRes.type==='success') {
+                for (const [docId, range] of Object.entries(rangesRes.ranges)) {
+                    // associate comments with threads
+                    range.comments?.forEach((comment) => {
+                        comment.thread = threadsRes.threads[comment.op.t];
+                        threadsRes.threads[comment.op.t].doc_id = docId;
+                    });
+                }
+                // return ranges and threads
+                const [ranges, threads] = [rangesRes.ranges, threadsRes.threads];
+                return {ranges, threads};
+            }
+        }
+        // return undefined if failed
+        return undefined;
+    }
+
+    async resolveCommentThread(threadId: string) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).resolveCommentThread(identity, this.projectId, threadId);
+        return res.type==='success'? true : false;
+    }
+
+    async reopenResolvedCommentThread(threadId: string) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).reopenResolvedCommentThread(identity, this.projectId, threadId);
+        return res.type==='success'? true : false;
+    }
+
+    async deleteResolvedCommentThread(docId: string, threadId: string) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).deleteResolvedCommentThread(identity, this.projectId, docId, threadId);
+        return res.type==='success'? true : false;
+    }
+
+    async createCommentThread(docId: string, threadId: string, quotedPosition: number, quotedText: string, content: string) {
+        const doc = this._resolveById(docId)!.fileEntity as DocumentEntity;
+        this.socket.applyOtUpdate(docId, {
+            doc: docId,
+            v: doc.version!,
+            op: [{ c:quotedText, p:quotedPosition, t:threadId }],
+        });
+        return await this.postCommentThreadMessage(threadId, content);
+    }
+
+    async postCommentThreadMessage(threadId: string, content: string) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).postCommentThreadMessage(identity, this.projectId, threadId, content);
+        return res.type==='success'? true : false;
+    }
+
+    async deleteCommentThreadMessage(threadId: string, messageId: string) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).deleteCommentThreadMessage(identity, this.projectId, threadId, messageId);
+        return res.type==='success'? true : false;
+    }
+
+    async editCommentThreadMessage(threadId: string, messageId: string, content: string) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).editCommentThreadMessage(identity, this.projectId, threadId, messageId, content);
+        return res.type==='success'? true : false;
+    }
+
+    async toggleTrackChanges(on_for: boolean | {[userId:string]: boolean}) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).toggleTrackChanges(identity, this.projectId, on_for);
+        if (res.type==='success' && this.root) {
+            this.root.trackChangesState = on_for;
+        }
+        return res.type==='success'? true : false;
+    }
+
+    async acceptTrackChanges(docId: string, changeIds: string[]) {
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await (this.api as ExtendedBaseAPI).acceptTrackChanges(identity, this.projectId, docId, changeIds);
+        return res.type==='success'? true : false;
     }
 }
 

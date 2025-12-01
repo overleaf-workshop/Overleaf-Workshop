@@ -361,13 +361,13 @@
       {
         "command": "overleaf-workshop.collaboration.copyLineRef",
         "title": "%commands.collaboration.copyLineRef.title%",
-        "enablement": "editorTextFocus && resourceScheme == overleaf-workshop",
+        "enablement": "editorTextFocus && editorHasSelection && resourceScheme == overleaf-workshop",
         "category": "%extension.displayName%"
       },
       {
         "command": "overleaf-workshop.collaboration.insertLineRef",
         "title": "%commands.collaboration.insertLineRef.title%",
-        "enablement": "editorTextFocus && resourceScheme == overleaf-workshop",
+        "enablement": "editorTextFocus && editorHasSelection && resourceScheme == overleaf-workshop",
         "category": "%extension.displayName%"
       },
       {
@@ -379,6 +379,18 @@
       {
         "command": "overleaf-workshop.collaboration.jumpToUser",
         "title": "%commands.collaboration.jumpToUser.title%",
+        "enablement": "resourceScheme == overleaf-workshop || overleaf-workshop.activate",
+        "category": "%extension.displayName%"
+      },
+      {
+        "command": "overleaf-workshop.collaboration.addComment",
+        "title": "%commands.collaboration.addComment.title%",
+        "enablement": "editorTextFocus && editorHasSelection && resourceScheme == overleaf-workshop",
+        "category": "%extension.displayName%"
+      },
+      {
+        "command": "overleaf-workshop.collaboration.toggleTrackChanges",
+        "title": "%commands.collaboration.toggleTrackChanges.title%",
         "enablement": "resourceScheme == overleaf-workshop || overleaf-workshop.activate",
         "category": "%extension.displayName%"
       }
@@ -547,6 +559,10 @@
         },
         {
           "command": "overleaf-workshop.collaboration.insertLineRef",
+          "when": "resourceScheme == overleaf-workshop || overleaf-workshop.activate"
+        },
+        {
+          "command": "overleaf-workshop.collaboration.addComment",
           "when": "resourceScheme == overleaf-workshop || overleaf-workshop.activate"
         }
       ],
