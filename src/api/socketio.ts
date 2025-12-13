@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import { Identity, BaseAPI, ProjectMessageResponseSchema } from './base';
+import { Identity, BaseAPI, ProjectMessageResponseSchema, UserInfoSchema } from './base';
 import { FileEntity, DocumentEntity, FileRefEntity, FileType, FolderEntity, ProjectEntity } from '../core/remoteFileSystemProvider';
 import { EventBus } from '../utils/eventBus';
 import { SocketIOAlt } from './socketioAlt';
+import { CommentThreadMessageSchema } from './extendedBase';
 
 export interface UpdateUserSchema {
     id: string,
@@ -38,6 +39,8 @@ export interface UpdateSchema {
         i?: string, //insert
         d?: string, //delete
         u?: boolean, //isUndo
+        c?: string, //quoted text
+        t?: string, //thread id
     }[],
     v: number, //doc version number
     lastV?: number, //last version number
@@ -46,6 +49,7 @@ export interface UpdateSchema {
         source: string, //socketio client id
         ts: number, //unix timestamp
         user_id: string,
+        tc?: string, //track change id
     }
 }
 
@@ -66,6 +70,15 @@ export interface EventsHandler {
     onSpellCheckLanguageUpdated?: (language:string) => void,
     onCompilerUpdated?: (compiler:string) => void,
     onRootDocUpdated?: (rootDocId:string) => void,
+    // [Server Pro] comment
+    onCommentThreadResolved?: (threadId:string, userInfo:UserInfoSchema) => void,
+    onCommentThreadReopen?: (threadId:string) => void,
+    onCommentThreadDeleted?: (threadId:string) => void,
+    onCommentThreadMessageCreated?: (threadId:string, message:CommentThreadMessageSchema) => void,
+    onCommentThreadMessageEdited?: (threadId:string, messageId:string, content:string) => void,
+    onCommentThreadMessageDeleted?: (threadId:string, messageId:string) => void,
+    onToggleTrackChanges?: (enabling:boolean | {[userId:string]: boolean}) => void,
+    onAcceptTrackChanges?: (docId:string, tcIds: string[]) => void,
 }
 
 type ConnectionScheme = 'Alt' | 'v1' | 'v2';
@@ -258,6 +271,46 @@ export class SocketIOAPI {
                 case handlers.onRootDocUpdated:
                     this.socket.on('rootDocUpdated', (rootDocId:string) => {
                         handler(rootDocId);
+                    });
+                    break;
+                case handlers.onCommentThreadResolved:
+                    this.socket.on('resolve-thread', (threadId:string, userInfo:UserInfoSchema) => {
+                        handler(threadId, userInfo);
+                    });
+                    break;
+                case handlers.onCommentThreadReopen:
+                    this.socket.on('reopen-thread', (threadId:string) => {
+                        handler(threadId);
+                    });
+                    break;
+                case handlers.onCommentThreadDeleted:
+                    this.socket.on('delete-thread', (threadId:string) => {
+                        handler(threadId);
+                    });
+                    break;
+                case handlers.onCommentThreadMessageCreated:
+                    this.socket.on('new-comment', (threadId:string, message:CommentThreadMessageSchema) => {
+                        handler(threadId, message);
+                    });
+                    break;
+                case handlers.onCommentThreadMessageEdited:
+                    this.socket.on('edit-message', (threadId:string, messageId:string, content:string) => {
+                        handler(threadId, messageId, content);
+                    });
+                    break;
+                case handlers.onCommentThreadMessageDeleted:
+                    this.socket.on('delete-message', (threadId:string, messageId:string) => {
+                        handler(threadId, messageId);
+                    });
+                    break;
+                case handlers.onToggleTrackChanges:
+                    this.socket.on('toggle-track-changes', (enabling:boolean | {[userId:string]: boolean}) => {
+                        handler(enabling);
+                    });
+                    break;
+                case handlers.onAcceptTrackChanges:
+                    this.socket.on('accept-changes', (docId:string, tcIds: string[]) => {
+                        handler(docId, tcIds);
                     });
                     break;
                 default:

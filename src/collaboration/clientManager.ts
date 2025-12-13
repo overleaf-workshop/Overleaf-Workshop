@@ -5,6 +5,7 @@ import { SocketIOAPI, UpdateUserSchema } from '../api/socketio';
 import { VirtualFileSystem } from '../core/remoteFileSystemProvider';
 import { ChatViewProvider } from './chatViewProvider';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import { ReviewPanelProvider } from './reviewPanelProvider';
 
 interface ExtendedUpdateUserSchema extends UpdateUserSchema {
     selection?: {
@@ -59,6 +60,7 @@ export class ClientManager {
     private readonly onlineUsers: {[K:string]:ExtendedUpdateUserSchema} = {};
     private connectedFlag: boolean = true;
     private readonly chatViewer: ChatViewProvider;
+    private readonly reviewPanel: ReviewPanelProvider;
 
     constructor(
         private readonly vfs: VirtualFileSystem,
@@ -101,6 +103,7 @@ export class ClientManager {
         });
 
         this.chatViewer = new ChatViewProvider(this.vfs, this.publicId, this.context.extensionUri, this.socket);
+        this.reviewPanel = new ReviewPanelProvider(this.vfs, this.context, this.socket);
         this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
         this.updateStatus();
     }
@@ -253,12 +256,21 @@ export class ClientManager {
                 break;
             case true:
                 let prefixText = '';
+                let tooltip = new vscode.MarkdownString();
+
+                // notify track changes state
+                if (this.vfs.trackChangesState) {
+                    prefixText = prefixText.concat(`$(record-small) `);
+                    tooltip.appendMarkdown(`<h5 align="center">${vscode.l10n.t('Track changes is on.')}</h5><hr>\n\n`);
+                }
+
                 // notify unread messages
                 if (this.chatViewer.hasUnread) {
                     prefixText = prefixText.concat(`$(bell-dot) ${this.chatViewer.hasUnread} `);
                 }
                 this.status.command = this.chatViewer.hasUnread? `${ROOT_NAME}.collaboration.revealChatView` : `${ROOT_NAME}.collaboration.settings`;
                 this.status.backgroundColor = this.chatViewer.hasUnread? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+
                 // notify unSynced changes
                 const unSynced = this.socket.unSyncFileChanges;
                 if (unSynced) {
@@ -271,12 +283,12 @@ export class ClientManager {
                     case 0:
                         this.status.color = undefined;
                         this.status.text = prefixText + `${onlineIcon} 0`;
-                        this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Online')}`;
+                        tooltip.appendMarkdown(`${ELEGANT_NAME}: ${vscode.l10n.t('Online')}`);
+                        this.status.tooltip = tooltip;
                         break;
                     default:
                         this.status.color = this.activeExists ? this.onlineUsers[this.activeExists].selection?.color : undefined;
                         this.status.text = prefixText + `${onlineIcon} ${count}`;
-                        const tooltip = new vscode.MarkdownString();
                         tooltip.appendMarkdown(`${ELEGANT_NAME}: ${this.activeExists? vscode.l10n.t('Active'): vscode.l10n.t('Idle') }\n\n`);
 
                         Object.values(this.onlineUsers).forEach(user => {
@@ -376,6 +388,8 @@ export class ClientManager {
             }),
             // register chat view provider
             ...this.chatViewer.triggers,
+            // register review panel provider
+            ...this.reviewPanel.triggers,
             // update this client's position
             vscode.window.onDidChangeTextEditorSelection(async e => {
                 if (e.kind===undefined) { return; }
