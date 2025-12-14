@@ -18,16 +18,21 @@ jobs:
         ref: refs/heads/master
         fetch-depth: 2
 
-    - name: Determine if package.json changed in the last commit
+    - name: Determine if package.json changed in the last 24 hours
       id: pkg_changed
       run: |
-        # if there is a previous commit available (fetch-depth:2 gives HEAD~1), diff only the root package.json
-        if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-          CHANGED=$(git diff --name-only HEAD~1 HEAD -- package.json || true)
-        else
-          # fallback: list top-level files only (no -r) and match exact 'package.json' to avoid subfolder matches
-          CHANGED=$(git ls-tree --name-only HEAD | grep -x 'package.json' || true)
+        # Look for any commits touching package.json in the last 24 hours.
+        # If this is a shallow clone, try to fetch more history and retry.
+        CHANGED=$(git log --since="24 hours ago" --pretty=format:%H -- package.json || true)
+
+        if [ -z "$CHANGED" ]; then
+          # If the repo may be shallow, try to unshallow or fetch more history and retry
+          if git rev-parse --is-shallow-repository >/dev/null 2>&1 && [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --prune --unshallow || git fetch --prune --depth=50 origin || true
+          fi
+          CHANGED=$(git log --since="24 hours ago" --pretty=format:%H -- package.json || true)
         fi
+
         if [ -n "$CHANGED" ]; then
           echo "changed=true" >> $GITHUB_OUTPUT
         else
