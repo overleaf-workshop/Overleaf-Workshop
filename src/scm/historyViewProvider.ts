@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { EventBus } from '../utils/eventBus';
 import { VirtualFileSystem, parseUri } from '../core/remoteFileSystemProvider';
 import { OUTPUT_FOLDER_NAME, ROOT_NAME } from '../consts';
-import { ProjectLabelResponseSchema } from '../api/base';
+import { ProjectLabelResponseSchema, UserInfoSchema } from '../api/base';
 
 interface HistoryRecord {
     before?: number,
@@ -13,12 +13,7 @@ interface HistoryRecord {
         [toV:number]: {
             fromV: number,
             timestamp: number,
-            users: {
-                id: string,
-                first_name: string,
-                last_name?: string,
-                email: string,
-            }[]
+            users: UserInfoSchema[]
         }
     },
     labels: {[version:number]: ProjectLabelResponseSchema[]},

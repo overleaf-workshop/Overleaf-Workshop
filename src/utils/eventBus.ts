@@ -11,6 +11,7 @@ export type Events = {
     'rootDocUpdateEvent': {rootDocId:string},
     'scmStatusChangeEvent': {status:StatusInfo},
     'socketioConnectedEvent': {publicId:string},
+    'trackChangesStateUpdateEvent': {enabling:boolean | {[userId:string]: boolean}},
 };
 
 export class EventBus {

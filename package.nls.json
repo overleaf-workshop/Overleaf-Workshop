@@ -48,6 +48,8 @@
     "commands.collaboration.insertLineRef.title": "Overleaf: Insert Line Reference",
     "commands.collaboration.revealChatView.title": "Focus on Overleaf Chat View",
     "commands.collaboration.jumpToUser.title": "Jump to Collaborator ...",
+    "commands.collaboration.addComment.title": "Overleaf: Add Comment",
+    "commands.collaboration.toggleTrackChanges.title": "Overleaf: Toggle Track Changes",
 
     "configuration.compileOnSave.enabled.markdownDescription": "Always update the compiled PDF when a file is saved.",
     "configuration.compileOutputFolderName.markdownDescription": "The name of the folder where the compiled output files (e.g., `output.pdf`) is located. (Take effect after restarting VSCode)",
