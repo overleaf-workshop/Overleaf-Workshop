@@ -915,7 +915,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (this.root) {
             // update output buildId
             // '/project/65dbfff719ad65b54b9eaed4/user/65094b5fa537faaba0bec01f/build/19620231e54-5372f67292889500/output/output.aux' --> 19620231e54-5372f67292889500'
-            this.outputBuildId = outputs[0].url.split('/').slice(-3)[0];
+            this.outputBuildId = outputs[0].url.split('/').slice(6)[0];
 
             const rootFolder = this.root.rootFolder[0];
             if (this.removeEntityById(rootFolder, 'folder', __OUTPUTS_ID)) {
