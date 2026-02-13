@@ -70,9 +70,26 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         super(vfs, baseUri);
     }
 
+    private static sanitizeProjectFolderName(projectName: string): string {
+        if (process.platform !== 'win32') {
+            return projectName;
+        }
+        let sanitized = projectName
+            .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+            .replace(/[. ]+$/g, '');
+        if (sanitized === '') {
+            sanitized = 'untitled-project';
+        }
+        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(sanitized)) {
+            sanitized = `${sanitized}_`;
+        }
+        return sanitized;
+    }
+
     public static async validateBaseUri(uri: string, projectName?: string): Promise<vscode.Uri> {
         try {
             let baseUri = vscode.Uri.file(uri);
+            const folderName = projectName===undefined ? undefined : LocalReplicaSCMProvider.sanitizeProjectFolderName(projectName);
             // check if the path exists
             try {
                 const stat = await vscode.workspace.fs.stat(baseUri);
@@ -80,8 +97,8 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                     throw new Error('Not a folder');
                 }
                 // check if the project name is included in the path
-                if (projectName!==undefined && !baseUri.path.endsWith(`/${projectName}`)) {
-                    baseUri = vscode.Uri.joinPath(baseUri, projectName);
+                if (folderName!==undefined && !baseUri.path.endsWith(`/${folderName}`)) {
+                    baseUri = vscode.Uri.joinPath(baseUri, folderName);
                 }
             } catch {
                 // keep the baseUri as is
