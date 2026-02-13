@@ -77,7 +77,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         let sanitized = projectName
             .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
             .replace(/[. ]+$/g, '');
-        if (sanitized === '') {
+        if (sanitized==='') {
             sanitized = 'untitled-project';
         }
         if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(sanitized)) {
