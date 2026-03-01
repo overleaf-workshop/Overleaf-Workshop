@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.7] - 2026-03-01
+### Added
+- feat: auto publish flow daily trigger
+  - Commit: 0ad6e00150ee3f99708def8934ededf93d497783
+
+### Changed
+- fix: github auto publish workflow check condition
+  - Commit: 7e2a917b2d4ab3d608c67ab73ee8e0a882fb9806
+- Fix outputBuildId extraction logic
+  - Commit: 1972eb0a53be385eba40a691c4a9b56a829cc539
+- Use regex to extract outputBuildId
+  - Commit: cee5716c68b756f1134af5419616c958fa7b7c8b
+- fix(local-replica): sanitize invalid windows chars in project folder name
+  - Commit: fix(local-replica): sanitize invalid windows chars in project folder name
+
 ## [0.15.6] - 2025-10-30
 ### Changed
 - chore(deps): bump brace-expansion in /views/chat-view
