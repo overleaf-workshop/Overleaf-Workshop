@@ -44,6 +44,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         '**/.*',
         '**/.*/**',
         '**/*.aux',
+        '**/__latexindent*',
         '**/*.bbl',
         '**/*.bcf',
         '**/*.blg',
