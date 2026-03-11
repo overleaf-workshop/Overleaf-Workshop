@@ -4,6 +4,10 @@ import { FileEntity, DocumentEntity, FileRefEntity, FileType, FolderEntity, Proj
 import { EventBus } from '../utils/eventBus';
 import { SocketIOAlt } from './socketioAlt';
 
+function decodePackedUtf8(text: string): string {
+    return Buffer.from(text, 'latin1').toString('utf8');
+}
+
 export interface UpdateUserSchema {
     id: string,
     user_id: string,
@@ -321,7 +325,7 @@ export class SocketIOAPI {
         return this.emit('joinDoc', docId, { encodeRanges: true })
             .then((returns: [Array<string>, number, Array<any>, any]) => {
                 const [docLinesAscii, version, updates, ranges] = returns;
-                const docLines = docLinesAscii.map((line) => Buffer.from(line, 'ascii').toString('utf-8') );
+                const docLines = docLinesAscii.map((line) => decodePackedUtf8(line));
                 return {docLines, version, updates, ranges};
             });
     }
