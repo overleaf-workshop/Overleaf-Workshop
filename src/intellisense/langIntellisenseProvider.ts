@@ -7,6 +7,7 @@ import { TexDocumentSymbolProvider } from './texDocumentSymbolProvider';
 import { TexDocumentFormatProvider } from './texDocumentFormatProvider';
 import { MisspellingCheckProvider } from './langMisspellingCheckProvider';
 import { CommandCompletionProvider, ConstantCompletionProvider, FilePathCompletionProvider, ReferenceCompletionProvider } from './langCompletionProvider';
+import { CitationHoverProvider } from './citationHoverProvider';
 
 export class LangIntellisenseProvider {
     private status: vscode.StatusBarItem;
@@ -24,6 +25,7 @@ export class LangIntellisenseProvider {
             new ConstantCompletionProvider(vfsm, context.extensionUri),
             new FilePathCompletionProvider(vfsm),
             new ReferenceCompletionProvider(vfsm, texSymbolProvider),
+            new CitationHoverProvider(vfsm, texSymbolProvider),
             // misspelling check provider
             new MisspellingCheckProvider(vfsm),
         ];
