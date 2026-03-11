@@ -5,7 +5,7 @@ import { EventBus } from '../utils/eventBus';
 import { SocketIOAlt } from './socketioAlt';
 
 function decodePackedUtf8(text: string): string {
-    return Buffer.from(text, 'latin1').toString('utf8');
+    return Buffer.from(text, 'latin1').toString('utf-8');
 }
 
 export interface UpdateUserSchema {
