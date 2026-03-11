@@ -182,7 +182,9 @@ You can also right click on a folder to import a linked file via **"Overleaf: Im
 
 ### Compile the Project
 
-Different from the Overleaf web editor with an eye-catching `Recompile` button, the compile in Overleaf Workshop extension is triggered via shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>.
+When a `.tex` file is open, a **Compile** button (▶) and a **View PDF** button appear in the top-right corner of the editor title bar. Clicking the **Compile** button triggers a compile, and clicking the **View PDF** button opens the compiled PDF on the side. The compile can also be triggered via the shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>.
+
+> **Note**: If the **Compile** button is missing from the editor title bar, it may have been accidentally hidden using VS Code's editor title bar customization. To restore it, right-click anywhere on the editor title bar (the area with the buttons in the top-right of the editor), and re-enable the **"Compile Project"** (and/or **"View Compiled PDF"**) entry from the context menu. Alternatively, you can open the Command Palette (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) and run **"Overleaf Workshop: Compile Project"** directly.
 
 The compile status is displayed in the status bar, which is located at the bottom of the VS Code window.
 
@@ -410,16 +412,27 @@ The compiled PDF `output.pdf` is located in the output folder, which is `.output
 P.S. The compile is also automatically triggered when you save a `.tex` file. This feature is enabled by default, and can be disabled in the vscode settings.
 
 
-#### Q2: Why my VS Code plugin (e.g., `vscode-texlint`, `latex-utilities`) does not work?
+#### Q2: The Compile button has disappeared from the editor title bar. How do I restore it?
 
-**A2**: Due to the [limitation of the virtual workspace](https://github.com/microsoft/vscode/wiki/Virtual-Workspaces#signal-whether-your-extension-can-handle-virtual-workspaces), most of the existing VS Code extensions does not work in the virtual workspace. In this case, you can choose to [open the project locally](#open-project-locally) as a workaround.
+**A2**: VS Code allows you to hide individual buttons in the editor title bar by right-clicking on them. If you accidentally hid the **Compile** (or **View PDF**) button, you can restore it as follows:
+
+1. Open a `.tex` file in the editor.
+2. Right-click on the editor title bar (the area with icons in the top-right corner of the editor).
+3. In the context menu that appears, find and re-enable the **"Overleaf Workshop: Compile Project"** (and/or **"Overleaf Workshop: View Compiled PDF"**) entry.
+
+Alternatively, you can always trigger the compile directly from the Command Palette (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> → **"Overleaf Workshop: Compile Project"**) or via the shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>, regardless of whether the button is visible.
+
+
+#### Q3: Why my VS Code plugin (e.g., `vscode-texlint`, `latex-utilities`) does not work?
+
+**A3**: Due to the [limitation of the virtual workspace](https://github.com/microsoft/vscode/wiki/Virtual-Workspaces#signal-whether-your-extension-can-handle-virtual-workspaces), most of the existing VS Code extensions does not work in the virtual workspace. In this case, you can choose to [open the project locally](#open-project-locally) as a workaround.
 
 Please notice that not all Overleaf features enabled in a local folder. More specifically, the [compile](#compile-project), [PDF preview](#preview-document), [intellisense](#intellisense) and [project history](#history-of-changes) features are disabled by default. You need to refer to [LaTeX Workshop Extension](https://github.com/James-Yu/LaTeX-Workshop) as a complement.
 
 
-#### Q3: Why the extension loses connection to the server frequently or loading indefinitely?
+#### Q4: Why the extension loses connection to the server frequently or loading indefinitely?
 
-**A3**: It depends on your network environment. If you are suffering from the frequent disconnection or indefinite loading, please try the following solutions:
+**A4**: It depends on your network environment. If you are suffering from the frequent disconnection or indefinite loading, please try the following solutions:
 - Ping the Overleaf server domain (e.g., `www.overleaf.com`) to see if the DNS is resolved correctly and the server is reachable.
 - Remove the `Http: proxy` in the VS Code settings.
 - Enable/Disable the network proxy for VS Code (or the Overleaf server domain) globally.
