@@ -10,6 +10,37 @@ type TexFileStruct = {
     bibFilePaths: string[],
 };
 
+function normalizeProjectPath(path: string): string {
+    const segments = path.split('/');
+    const stack: string[] = [];
+    for (const segment of segments) {
+        if (segment==='' || segment==='.') {
+            continue;
+        }
+        if (segment==='..') {
+            stack.pop();
+            continue;
+        }
+        stack.push(segment);
+    }
+    return stack.join('/');
+}
+
+function resolvePathFromFile(sourcePath: string, targetPath: string, ext?: string): string {
+    const cleaned = targetPath.trim().replace(/^['\"]|['\"]$/g, '');
+    if (cleaned==='') {
+        return '';
+    }
+
+    const withExt = ext && !cleaned.endsWith(ext) ? `${cleaned}${ext}` : cleaned;
+    if (withExt.startsWith('/')) {
+        return normalizeProjectPath(withExt);
+    }
+
+    const parentPath = sourcePath.includes('/') ? sourcePath.slice(0, sourcePath.lastIndexOf('/')) : '';
+    return normalizeProjectPath(`${parentPath}/${withExt}`);
+}
+
 function elementsTypeCast(section: TeXElement): vscode.SymbolKind {
     switch (section.type) {
         case TeXElementType.Section:
@@ -137,7 +168,7 @@ class ProjectStructRecord {
     constructor (private readonly vfs: VirtualFileSystem) {}
 
     get rootPath(): string {
-        return this.vfs.getRootDocName();
+        return normalizeProjectPath(this.vfs.getRootDocName());
     }
 
     async init() {
@@ -159,7 +190,7 @@ class ProjectStructRecord {
     }
 
     getTexFileStruct(document: vscode.TextDocument): TexFileStruct | undefined {
-        const filePath = document.fileName;
+        const filePath = normalizeProjectPath(parseUri(document.uri).pathParts.join('/'));
         return this.fileRecordMap.get(filePath);
     }
 
@@ -167,15 +198,28 @@ class ProjectStructRecord {
         let filePath:string, content: string;
         // get file path and content
         if (typeof source === 'string') {
-            const uri = this.vfs.pathToUri(source);
-            filePath = source;
+            filePath = normalizeProjectPath(source);
+            const uri = this.vfs.pathToUri(filePath);
             content = new TextDecoder().decode( await this.vfs.openFile(uri) );
         } else {
-            filePath = source.fileName;
+            filePath = normalizeProjectPath(parseUri(source.uri).pathParts.join('/'));
             content = source.getText();
         }
+
+        // Normalize references against the source document path so nested main files resolve correctly.
+        const rawFileStruct = await parseTexFileStruct(content);
+        const fileStruct: TexFileStruct = {
+            texElements: rawFileStruct.texElements,
+            childrenPaths: rawFileStruct.childrenPaths
+                .map((childPath) => resolvePathFromFile(filePath, childPath, '.tex'))
+                .filter((childPath) => childPath!==''),
+            bibFilePaths: rawFileStruct.bibFilePaths
+                .flatMap((name) => name.split(','))
+                .map((name) => resolvePathFromFile(filePath, name, '.bib'))
+                .filter((bibPath) => bibPath!==''),
+        };
+
         // update file record
-        const fileStruct = await parseTexFileStruct( content );
         this.fileRecordMap.set(filePath, fileStruct);
         return fileStruct;
     }
@@ -185,20 +229,20 @@ class ProjectStructRecord {
         if (rootStruct === undefined) { return []; }
 
         const queue = [rootStruct];
-        const bibFilePaths: string[] = [];
+        const bibFilePaths = new Set<string>();
         // iteratively traverse file node tree
         while (queue.length > 0) {
             const item = queue.shift()!;
-            const paths = item.bibFilePaths.flatMap( name => (name.split(',') ?? []) )
-                                           .map( name => (name.endsWith('.bib') ? name : `${name}.bib`) );
-            bibFilePaths.push(...paths);
+            item.bibFilePaths.forEach((path) => {
+                bibFilePaths.add(path);
+            });
             // append children to queue
             item.childrenPaths.forEach( child => {
                 const childItem = this.fileRecordMap.get(child);
                 childItem && queue.push(childItem);
             });
         }
-        return bibFilePaths;
+        return [...bibFilePaths];
     }
 }
 
