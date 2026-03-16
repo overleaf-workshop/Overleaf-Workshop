@@ -779,7 +779,7 @@
     "@typescript-eslint/eslint-plugin": "^5.59.8",
     "@typescript-eslint/parser": "^5.59.8",
     "@vscode/l10n-dev": "^0.0.31",
-    "@vscode/test-electron": "^2.3.2",
+    "@vscode/test-electron": "^2.5.2",
     "download-cli": "^1.1.1",
     "eslint": "^8.41.0",
     "husky": "^8.0.3",
