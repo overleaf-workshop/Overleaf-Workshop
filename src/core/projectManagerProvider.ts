@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ROOT_NAME } from '../consts';
 import { ProjectTagsResponseSchema } from '../api/base';
 import { GlobalStateManager } from '../utils/globalStateManager';
+import { Logger } from '../utils/logger';
 import { VirtualFileSystem, parseUri } from './remoteFileSystemProvider';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
 
@@ -567,6 +568,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
     }
 
     async openProjectLocalReplica(project: ProjectItem) {
+        Logger.info(`openProjectLocalReplica: starting for project "${project.label}"`);
         // should close other open vfs firstly
         const vfsFolder = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme===ROOT_NAME);
         if (vfsFolder) {
@@ -582,7 +584,9 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         // if not exist, create new one
         if (replicas.length===0) {
             const vfs = (await (await vscode.commands.executeCommand('remoteFileSystem.prefetch', uri))) as VirtualFileSystem;
+            Logger.info(`openProjectLocalReplica: VFS prefetched for ${uri.toString()}`);
             await vfs.init();
+            Logger.info(`openProjectLocalReplica: VFS initialized`);
             const answer = await vscode.window.showWarningMessage( vscode.l10n.t('No local replica found, create one for project "{label}" ?', {label:project.label}), "Yes", "No");
             if (answer === "Yes") {
                 await (await vscode.commands.executeCommand(`${ROOT_NAME}.projectSCM.newSCM`, LocalReplicaSCMProvider));
@@ -623,7 +627,8 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                             const scmKey = Object.keys(scmPersists).find(key => vscode.Uri.parse(scmPersists[key].baseUri).fsPath===item.label)!;
                             GlobalStateManager.updateServerProjectSCMPersist(this.context, serverName, projectId, scmKey);
                             // remove entry from quick pick
-                            quickPick.items = quickPick.items.filter(item => item.label!==item.label);
+                            const removedLabel = item.label;
+                            quickPick.items = quickPick.items.filter(qpItem => qpItem.label!==removedLabel);
                         }
                     });
                 }
@@ -638,6 +643,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
             quickPick.show();
         })
         .then(path => {
+            Logger.info(`openProjectLocalReplica: opening local folder ${path}`);
             const uri = vscode.Uri.file(path as string);
             // always open in current window
             vscode.commands.executeCommand('vscode.openFolder', uri, false);

@@ -7,6 +7,7 @@ import { LocalGitBridgeSCMProvider } from './localGitBridgeSCM';
 import { HistoryViewProvider } from './historyViewProvider';
 import { GlobalStateManager } from '../utils/globalStateManager';
 import { EventBus } from '../utils/eventBus';
+import { Logger } from '../utils/logger';
 import { ROOT_NAME } from '../consts';
 
 const supportedSCMs = [
@@ -152,7 +153,9 @@ export class SCMCollectionProvider extends vscode.Disposable {
         } catch (error) {
             // permanently remove failed scm
             // this.vfs.setProjectSCMPersist(scm.scmKey, undefined);
-            vscode.window.showErrorMessage( vscode.l10n.t('"{scm}" creation failed.', {scm:scmProto.label}) );
+            const errMsg = error instanceof Error ? error.message : String(error);
+            Logger.error(`SCM creation failed for "${scmProto.label}" at ${baseUri.toString()}`, error);
+            vscode.window.showErrorMessage( vscode.l10n.t('"{scm}" creation failed: {msg}', {scm:scmProto.label, msg:errMsg}) );
             return undefined;
         }
     }

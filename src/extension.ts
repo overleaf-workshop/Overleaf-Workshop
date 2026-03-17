@@ -7,8 +7,13 @@ import { PdfViewEditorProvider } from './core/pdfViewEditorProvider';
 import { CompileManager } from './compile/compileManager';
 import { LangIntellisenseProvider } from './intellisense';
 import { LocalReplicaSCMProvider } from './scm/localReplicaSCM';
+import { Logger } from './utils/logger';
 
 export function activate(context: vscode.ExtensionContext) {
+    // Initialize logger - must be first
+    context.subscriptions.push(Logger.init());
+    Logger.info('Overleaf Workshop activating');
+
     // Register: [core] RemoteFileSystemProvider
     const remoteFileSystemProvider = new RemoteFileSystemProvider(context);
     context.subscriptions.push( ...remoteFileSystemProvider.triggers );
@@ -36,6 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
             const uri = vscode.Uri.parse(setting.uri);
             if (uri.scheme===ROOT_NAME) {
                 // activate vfs
+                Logger.info(`Activating local replica VFS for: ${uri.toString()}`);
                 const vfs = (await (await vscode.commands.executeCommand('remoteFileSystem.prefetch', uri))) as VirtualFileSystem;
                 await vfs.init();
                 vscode.commands.executeCommand('setContext', `${ROOT_NAME}.activate`, true);
