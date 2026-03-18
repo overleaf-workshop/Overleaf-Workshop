@@ -7,6 +7,17 @@
     const SpreadMode = { UNKNOWN:-1, NONE:0, ODD:1, EVEN:2 };
     const ScrollMode = { UNKNOWN:-1, VERTICAL:0, HORIZONTAL:1, WRAPPED:2, PAGE:3 };
     const SidebarView = { UNKNOWN:-1, NONE:0, THUMBS:1, OUTLINE:2, ATTACHMENTS:3, LAYERS:4 };
+    const ScrollModeMap = {
+        vertical: ScrollMode.VERTICAL,
+        horizontal: ScrollMode.HORIZONTAL,
+        wrapped: ScrollMode.WRAPPED,
+        page: ScrollMode.PAGE,
+    };
+    const SpreadModeMap = {
+        none: SpreadMode.NONE,
+        odd: SpreadMode.ODD,
+        even: SpreadMode.EVEN,
+    };
     let ColorThemes = {
         'default': {fontColor:'black', bgColor:'white'},
         'light': {fontColor:'black', bgColor:'#F5F5DC'},
@@ -88,6 +99,24 @@
             `;
         }
         document.head.appendChild(style);
+    }
+
+    function updatePdfViewerDefaults(defaults) {
+        if (defaults === undefined || defaults === null) {
+            return;
+        }
+        if (typeof defaults.scrollMode === 'string') {
+            const scrollMode = ScrollModeMap[defaults.scrollMode.toLowerCase()];
+            if (scrollMode !== undefined) {
+                globalPdfViewerState.pdfViewerScrollMode = scrollMode;
+            }
+        }
+        if (typeof defaults.spreadMode === 'string') {
+            const spreadMode = SpreadModeMap[defaults.spreadMode.toLowerCase()];
+            if (spreadMode !== undefined) {
+                globalPdfViewerState.pdfViewerSpreadMode = spreadMode;
+            }
+        }
     }
 
     function enableThemeToggleButton(initIndex = 0){
@@ -209,6 +238,7 @@
                     syncCode(message.content);
                     break;
                 case 'initState':
+                    updatePdfViewerDefaults(message.defaults);
                     if (message.content!==undefined) {
                         Object.assign(globalPdfViewerState, message.content);
                     }

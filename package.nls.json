@@ -55,6 +55,8 @@
     "configuration.pdfViewer.themes.theme.description": "The name of the theme.",
     "configuration.pdfViewer.themes.fontColor.description": "The font color of the theme.",
     "configuration.pdfViewer.themes.backgroundColor.description": "The background color of the theme.",
+    "configuration.pdfViewer.defaultScrollMode.markdownDescription": "Configure the default scroll mode used by the PDF viewer for new state. Existing saved viewer state takes precedence.",
+    "configuration.pdfViewer.defaultSpreadMode.markdownDescription": "Configure the default spread mode used by the PDF viewer for new state. Existing saved viewer state takes precedence.",
     "configuration.invisibleMode.historyRefreshInterval.markdownDescription": "The interval (in seconds) to refresh the project history in invisible mode, which is used to update the file changes, collaborator status, etc.",
     "configuration.invisibleMode.chatMessageRefreshInterval.markdownDescription": "The interval (in seconds) to refresh the chat messages in invisible mode.",
     "configuration.invisibleMode.inactiveTimeout.markdownDescription": "The timeout (in seconds) to mark a online Collaborator as inactivate in invisible mode.",

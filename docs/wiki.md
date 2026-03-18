@@ -395,6 +395,8 @@ The project-irrelevant configurations of the extension can be found in the VS Co
         "dark":    {"fontColor":"#FBF0D9", "bgColor":"#4B4B4B"}
     }
     ```
+- **PDF Viewer: Default Scroll Mode**: This configuration controls the default scroll mode for the PDF viewer when there is no saved viewer state for the PDF. Allowed values are `vertical`, `horizontal`, `wrapped`, and `page`. The default value is `vertical`.
+- **PDF Viewer: Default Spread Mode**: This configuration controls the default spread mode for the PDF viewer when there is no saved viewer state for the PDF. Allowed values are `none`, `odd`, and `even`. The default value is `none`.
 - **Formatter: Line break**: The formatter will restrict line length as 80 characters in default. Toggle the following option will disable this feature.
 
     ![alt text](assets/screenshot-formatter-linebreak.png)

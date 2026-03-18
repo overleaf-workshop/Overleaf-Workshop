@@ -463,6 +463,29 @@
           "scope": "machine",
           "markdownDescription": "%configuration.pdfViewer.themes.markdownDescription%"
         },
+        "overleaf-workshop.pdfViewer.defaultScrollMode": {
+          "type": "string",
+          "enum": [
+            "vertical",
+            "horizontal",
+            "wrapped",
+            "page"
+          ],
+          "default": "vertical",
+          "scope": "machine",
+          "markdownDescription": "%configuration.pdfViewer.defaultScrollMode.markdownDescription%"
+        },
+        "overleaf-workshop.pdfViewer.defaultSpreadMode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "odd",
+            "even"
+          ],
+          "default": "none",
+          "scope": "machine",
+          "markdownDescription": "%configuration.pdfViewer.defaultSpreadMode.markdownDescription%"
+        },
         "overleaf-workshop.invisibleMode.historyRefreshInterval": {
           "type": "number",
           "default": 3,
