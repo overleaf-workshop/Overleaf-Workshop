@@ -226,9 +226,12 @@ export class CompileManager {
                 .then(status =>
                     status ?
                         vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compileErrorCheck`, uri)
-                        : Promise.reject()
+                        : undefined
                 )
                 .then(async (hasError) => {
+                    if (hasError===undefined) {
+                        return;
+                    }
                     if (hasError) {
                         await this.update('failed');
                     } else {
@@ -239,6 +242,10 @@ export class CompileManager {
                     pdfViewRecord[identifier] && Object.values(pdfViewRecord[identifier]).forEach(
                         (record) => record.doc.refresh()
                     );
+                })
+                .catch(async (error) => {
+                    console.error(`${ELEGANT_NAME}: compile chain failed`, error);
+                    await this.update('failed');
                 });
 
         }

@@ -75,7 +75,7 @@ export interface EventsHandler {
 type ConnectionScheme = 'Alt' | 'v1' | 'v2';
 
 export class SocketIOAPI {
-    private scheme: ConnectionScheme = 'v1';
+    private scheme: ConnectionScheme = 'v2';
     private record?: Promise<ProjectEntity>;
     private _handlers: Array<EventsHandler> = [];
 
@@ -289,31 +289,65 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async joinProject(project_id:string): Promise<ProjectEntity> {
+        if (this.scheme==='v2') {
+            try {
+                return await this.joinProjectByV2();
+            } catch (err) {
+                // Old Overleaf stacks may not support auto join via handshake.
+                // Fallback to legacy joinProject event to keep compatibility.
+                this.scheme = 'v1';
+                this.init();
+                return this.joinProjectByV1(project_id);
+            }
+        }
+
+        try {
+            return await this.joinProjectByV1(project_id);
+        } catch (err) {
+            if (!this.shouldFallbackToV2(err)) {
+                throw err;
+            }
+            // New Overleaf stacks require projectId in handshake query.
+            this.scheme = 'v2';
+            this.init();
+            return this.joinProjectByV2();
+        }
+    }
+
+    private async joinProjectByV1(project_id:string): Promise<ProjectEntity> {
         const timeoutPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
             setTimeout(() => {
                 reject('timeout');
             }, 5000);
         });
 
-        switch(this.scheme) {
-            case 'Alt':
-            case 'v1':
-                const joinPromise = this.emit('joinProject', {project_id})
-                .then((returns:[ProjectEntity, string, number]) => {
-                    const [project, permissionsLevel, protocolVersion] = returns;
-                    this.record = Promise.resolve(project);
-                    return project;
-                });
-                const rejectPromise = new Promise((_, reject) => {
-                    this.socket.on('connectionRejected', (err:any) => {
-                        this.scheme = 'v2';
-                        reject(err.message);
-                    });
-                });
-                return Promise.race([joinPromise, rejectPromise, timeoutPromise]);
-            case 'v2':
-                return Promise.race([this.record!, timeoutPromise]);
-        }
+        const joinPromise = this.emit('joinProject', {project_id})
+            .then((returns:[ProjectEntity, string, number]) => {
+                const [project, permissionsLevel, protocolVersion] = returns;
+                this.record = Promise.resolve(project);
+                return project;
+            });
+        const rejectPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
+            this.socket.on('connectionRejected', (err:any) => {
+                reject(err?.message ?? err);
+            });
+        });
+
+        return Promise.race([joinPromise, rejectPromise, timeoutPromise]);
+    }
+
+    private async joinProjectByV2(): Promise<ProjectEntity> {
+        const timeoutPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
+            setTimeout(() => {
+                reject('timeout');
+            }, 5000);
+        });
+        return Promise.race([this.record!, timeoutPromise]);
+    }
+
+    private shouldFallbackToV2(err: unknown): boolean {
+        const message = String(err ?? '').toLowerCase();
+        return message.includes('missing/bad ?projectid') || message.includes('bad projectid') || message.includes('missing projectid');
     }
 
     /**

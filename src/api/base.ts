@@ -239,10 +239,12 @@ export class BaseAPI {
 
     // Reference: "github:overleaf/overleaf/services/web/frontend/js/ide/connection/ConnectionManager.js#L137"
     _initSocketV0(identity:Identity, query?:string) {
-        const url = new URL(this.url).origin + (query ?? '');
-        return (require('socket.io-client').connect as any)(url, {
+        const baseUrl = new URL(this.url).origin;
+        const queryString = query?.startsWith('?') ? query.slice(1) : query;
+        return (require('socket.io-client').connect as any)(baseUrl, {
             reconnect: false,
             'force new connection': true,
+            ...(queryString ? {query: queryString} : {}),
             extraHeaders: {
                 'Origin': new URL(this.url).origin,
                 'Cookie': identity.cookies,
@@ -601,7 +603,7 @@ export class BaseAPI {
         };
 
         this.setIdentity(identity);
-        return this.request('POST', `project/${projectId}/compile?auto_compile=true`, body, (res) => {
+        return this.request('POST', `project/${projectId}/compile`, body, (res) => {
             const compile = JSON.parse(res!) as CompileResponseSchema;
             return {compile};
         }, {'X-Csrf-Token': identity.csrfToken});
