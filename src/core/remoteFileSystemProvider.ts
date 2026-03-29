@@ -885,9 +885,15 @@ export class VirtualFileSystem extends vscode.Disposable {
             }
             // compile project
             const resolvedRootDocId = rootDocId ?? this.root?.rootDoc_id ?? null;
-            const rootResourcePath = resolvedRootDocId
-                ? (this._resolveById(resolvedRootDocId)?.path ?? '').replace(/^\//, '')
-                : null;
+            let rootResourcePath: string | null = null;
+            if (resolvedRootDocId) {
+                const rootEntry = this._resolveById(resolvedRootDocId);
+                if (rootEntry?.path) {
+                    rootResourcePath = rootEntry.path.replace(/^\//, '');
+                } else {
+                    console.warn(`Unable to resolve root document id '${resolvedRootDocId}' to a path; compiling without explicit rootResourcePath.`);
+                }
+            }
             const res = await this.api.compile(identity, this.projectId, rootResourcePath, draft, stopOnFirstError);
             if (res.type==='success' && res.compile?.status==='success') {
                 this.updateOutputs(res.compile.outputFiles);
