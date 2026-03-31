@@ -2,7 +2,7 @@
   "name": "overleaf-workshop",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.15.7",
+  "version": "0.15.8",
   "icon": "resources/icons/app_icon.png",
   "author": {
     "name": "iamhyc",
@@ -31,6 +31,18 @@
     {
       "name": "LaureatePoet",
       "url": "https://github.com/LaureatePoet"
+    },
+    {
+      "name": "akretz",
+      "url": "https://github.com/akretz"
+    },
+    {
+      "name": "JRodez",
+      "url": "https://github.com/JRodez"
+    },
+    {
+      "name": "riccardogibello",
+      "url": "https://github.com/riccardogibello"
     }
   ],
   "repository": {

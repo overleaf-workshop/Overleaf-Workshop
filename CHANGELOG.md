@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.8] - 2026-03-31
+### Added
+- feat(local-replica): add latexindent temporary filenames to default ignore patterns (#340)
+  - Commit: b666cb9cd031e80148f1efd6cc70a52068a015b1
+
+### Changed
+- fix: decode server ascii correctly (#343)
+  - Commit: 7fc47a9e4bbc14e4694c7eb4ee3902a29840d72c
+- fix: send rootResourcePath instead of rootDoc_id in compile request
+  - Commit: 23557220888da9d8cdd687bc0ab133cba48ae9c1
+- fix: handle unresolved rootDocId gracefully in compile request
+  - Commit: 8521263600d2120319b6f158e33350a9560135c7
+
 ## [0.15.7] - 2026-03-01
 ### Added
 - feat: auto publish flow daily trigger
