@@ -798,7 +798,7 @@
     "node-fetch": "^2.7.0",
     "prettier": "^3.1.1",
     "socket.io-client": "github:overleaf/socket.io-client#0.9.17-overleaf-5",
-    "uuid": "^9.0.1"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^18.4.3",
