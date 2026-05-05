@@ -118,6 +118,9 @@ export class VirtualFileSystem extends vscode.Disposable {
     private initializing?: Promise<ProjectEntity>;
     private retryConnection: number = 0;
     private outputBuildId?: string;
+    private compileGroup?: string;
+    private clsiServerId?: string;
+    private pdfDownloadDomain?: string;
     private notify: (events:vscode.FileChangeEvent[])=>void;
     private clientManagerItem?: {manager: ClientManager, triggers: vscode.Disposable[]};
     private scmCollectionItem?: {collection: SCMCollectionProvider, triggers: vscode.Disposable[]};
@@ -531,9 +534,10 @@ export class VirtualFileSystem extends vscode.Disposable {
                 return new TextEncoder().encode(content);
             }
         } else if (fileType==='outputs') {
+            const {compileGroup, clsiServerId, pdfDownloadDomain} = this;
             return GlobalStateManager.authenticate(this.context, this.serverName)
             .then((identity) => {
-                return this.api.getFileFromClsi(identity, (fileEntity as OutputFileEntity).url, 'standard')
+                return this.api.getFileFromClsi(identity, (fileEntity as OutputFileEntity).url, compileGroup || 'standard', clsiServerId, pdfDownloadDomain)
                 .then((res) => {
                     if (res.type==='success') {
                         EventBus.fire('fileWillOpenEvent', {uri});
@@ -896,6 +900,10 @@ export class VirtualFileSystem extends vscode.Disposable {
             }
             const res = await this.api.compile(identity, this.projectId, rootResourcePath, draft, stopOnFirstError);
             if (res.type==='success' && res.compile?.status==='success') {
+                // Store CDN download info from the response for subsequent output file requests
+                this.compileGroup = res.compile.compileGroup;
+                this.clsiServerId = res.compile.clsiServerId;
+                this.pdfDownloadDomain = res.compile.pdfDownloadDomain;
                 this.updateOutputs(res.compile.outputFiles);
                 return true;
             } else {

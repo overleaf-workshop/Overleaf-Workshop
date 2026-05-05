@@ -21,6 +21,8 @@ export interface NewProjectResponseSchema {
 export interface CompileResponseSchema {
     status: 'success' | 'failure' | 'error';
     compileGroup: string;
+    clsiServerId?: string;
+    pdfDownloadDomain?: string;
     outputFiles: Array<OutputFileEntity>;
     stats: {
         "latexmk-errors":number, "pdf-size":number,
@@ -684,15 +686,52 @@ export class BaseAPI {
         return this.request('POST', `project/${projectId}/settings`, setting);
     }
 
-    async getFileFromClsi(identity:Identity, url:string, compileGroup:string) {
-        url = url.replace(/^\/+/g, '');
+    async getFileFromClsi(identity:Identity, url:string, compileGroup:string, clsiServerId?:string, pdfDownloadDomain?:string) {
+        // If we have a CDN download domain, construct the full URL with required query params.
+        // The CDN is cross-origin, so we must NOT send web frontend cookies.
+        if (pdfDownloadDomain && clsiServerId) {
+            const cdnUrl = `${pdfDownloadDomain.replace(/\/+$/, '')}/${url.replace(/^\/+/g, '')}` +
+                `?compileGroup=${encodeURIComponent(compileGroup)}` +
+                `&clsiserverid=${encodeURIComponent(clsiServerId)}` +
+                `&enable_pdf_caching=true`;
+            const content = await this._downloadAbsolute(cdnUrl, false);
+            return { type: 'success', content: new Uint8Array(content) };
+        }
 
+        // Fallback: download from web frontend (legacy path)
+        url = url.replace(/^\/+/g, '');
         this.setIdentity(identity);
         const content = await this.download(url);
         return {
             type: 'success',
             content: new Uint8Array( content )
         };
+    }
+
+    /** Download from an absolute URL, optionally including web frontend cookies. */
+    private async _downloadAbsolute(absoluteUrl: string, includeCookies: boolean): Promise<Buffer> {
+        const headers: Record<string, string> = {
+            'Connection': 'keep-alive',
+        };
+        if (includeCookies && this.identity) {
+            headers['Cookie'] = this.identity.cookies;
+        }
+        let content: Buffer[] = [];
+        while (true) {
+            const res = await fetch(absoluteUrl, {
+                method: 'GET', redirect: 'manual', agent: this.agent,
+                headers
+            });
+            if (res.status === 200) {
+                content.push(await res.buffer());
+                break;
+            } else if (res.status === 206) {
+                content.push(await res.buffer());
+            } else {
+                break;
+            }
+        }
+        return Buffer.concat(content);
     }
 
     async proxySyncPdf(identity:Identity, projectId:string, page:number, h:number, v:number, buildId:string) {
