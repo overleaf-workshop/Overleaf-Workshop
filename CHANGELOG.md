@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.9] - 2026-05-06
+### Added
+- feat: add editable settings for pdf viewer
+  - Commit: f54839bbbec828acafe1a67b2b6f7b6108c7a320
+
+### Changed
+- fix: cite completion when main tex is in subdir
+  - Commit: 9eca5633a6b9b54b5909143a08e4853123b6cfb9
+- fix: download output files via CDN with required query params (fixes #369)
+  - Commit: d256556f0c1b3052b8872b9bd47c242780367495
+
 ## [0.15.8] - 2026-03-31
 ### Added
 - feat(local-replica): add latexindent temporary filenames to default ignore patterns (#340)
