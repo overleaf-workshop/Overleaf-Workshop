@@ -5,10 +5,9 @@
   "version": "0.15.9",
   "icon": "resources/icons/app_icon.png",
   "author": {
-    "name": "iamhyc",
-    "email": "ychong@petalmail.com"
+    "name": "overleaf-workshop"
   },
-  "publisher": "iamhyc",
+  "publisher": "overleaf-workshop",
   "contributors": [
     {
       "name": "iamhyc",
