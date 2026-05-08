@@ -59,6 +59,10 @@ export class ClientManager {
     private readonly onlineUsers: {[K:string]:ExtendedUpdateUserSchema} = {};
     private connectedFlag: boolean = true;
     private readonly chatViewer: ChatViewProvider;
+    /** Timestamp when connection was lost; used for grace period before clearing user list */
+    private disconnectedAt: number = 0;
+    /** Grace period in ms before clearing online user list on disconnect */
+    private static readonly DISCONNECT_GRACE_PERIOD_MS = 15000; // 15 seconds
 
     constructor(
         private readonly vfs: VirtualFileSystem,
@@ -76,9 +80,11 @@ export class ClientManager {
             },
             onDisconnected: () => {
                 this.connectedFlag = false;
+                this.disconnectedAt = Date.now();
             },
             onConnectionAccepted: (publicId:string) => {
                 this.connectedFlag = true;
+                this.disconnectedAt = 0;
             }
         });
         this.socket.getConnectedUsers().then(users => {
@@ -241,64 +247,78 @@ export class ClientManager {
 
     private updateStatus() {
         const count = Object.keys(this.onlineUsers).length;
-        switch (this.connectedFlag) {
-            case false:
+        if (!this.connectedFlag) {
+            const disconnectedDuration = Date.now() - this.disconnectedAt;
+            // Show reconnecting state during grace period
+            if (disconnectedDuration < ClientManager.DISCONNECT_GRACE_PERIOD_MS) {
+                this.status.color = new vscode.ThemeColor('statusBarItem.warningBackground');
+                this.status.backgroundColor = undefined;
+                this.status.text = '$(sync~spin) ' + vscode.l10n.t('Reconnecting...');
+                this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Connection interrupted, attempting to reconnect...')}`;
+                this.status.command = `${ROOT_NAME}.collaboration.settings`;
+                // Keep online user decorations during brief disconnections
+            } else {
+                // Grace period expired: show disconnected state
                 this.status.color = 'red';
+                this.status.backgroundColor = undefined;
                 this.status.text = '$(sync-ignored)';
                 this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Not connected')}`;
-                // Kick out all users indication since the connection is lost
+                this.status.command = `${ROOT_NAME}.collaboration.settings`;
+                // Clear online user decorations after grace period
                 Object.keys(this.onlineUsers).forEach(clientId => {
                     this.removePosition(clientId);
                 });
-                break;
-            case true:
-                let prefixText = '';
-                // notify unread messages
-                if (this.chatViewer.hasUnread) {
-                    prefixText = prefixText.concat(`$(bell-dot) ${this.chatViewer.hasUnread} `);
-                }
-                this.status.command = this.chatViewer.hasUnread? `${ROOT_NAME}.collaboration.revealChatView` : `${ROOT_NAME}.collaboration.settings`;
-                this.status.backgroundColor = this.chatViewer.hasUnread? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
-                // notify unSynced changes
-                const unSynced = this.socket.unSyncFileChanges;
-                if (unSynced) {
-                    prefixText = prefixText.concat(`$(arrow-up) ${unSynced} `);
-                }
+            }
+        } else {
+            // Connected state: clear any stale disconnect timestamp
+            this.disconnectedAt = 0;
 
-                const isInvisible = this.socket.isUsingAlternativeConnectionScheme;
-                const onlineIcon = isInvisible ? '$(person)' : '$(organization)';
-                switch (count) {
-                    case 0:
-                        this.status.color = undefined;
-                        this.status.text = prefixText + `${onlineIcon} 0`;
-                        this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Online')}`;
-                        break;
-                    default:
-                        this.status.color = this.activeExists ? this.onlineUsers[this.activeExists].selection?.color : undefined;
-                        this.status.text = prefixText + `${onlineIcon} ${count}`;
-                        const tooltip = new vscode.MarkdownString();
-                        tooltip.appendMarkdown(`${ELEGANT_NAME}: ${this.activeExists? vscode.l10n.t('Active'): vscode.l10n.t('Idle') }\n\n`);
+            let prefixText = '';
+            // notify unread messages
+            if (this.chatViewer.hasUnread) {
+                prefixText = prefixText.concat(`$(bell-dot) ${this.chatViewer.hasUnread} `);
+            }
+            this.status.command = this.chatViewer.hasUnread? `${ROOT_NAME}.collaboration.revealChatView` : `${ROOT_NAME}.collaboration.settings`;
+            this.status.backgroundColor = this.chatViewer.hasUnread? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+            // notify unSynced changes
+            const unSynced = this.socket.unSyncFileChanges;
+            if (unSynced) {
+                prefixText = prefixText.concat(`$(arrow-up) ${unSynced} `);
+            }
 
-                        Object.values(this.onlineUsers).forEach(user => {
-                            const userArgs = JSON.stringify([`@[[${user.name}#${user.user_id}]] `]);
-                            const userCommandUri = vscode.Uri.parse(`command:${ROOT_NAME}.collaboration.insertText?${encodeURIComponent(userArgs)}`);
-                            const userInfo = `<a href=${userCommandUri}>@<span style="color:${user.selection?.color};"><b>${user.name}</b></span></a>`;
+            const isInvisible = this.socket.isUsingAlternativeConnectionScheme;
+            const onlineIcon = isInvisible ? '$(person)' : '$(organization)';
+            switch (count) {
+                case 0:
+                    this.status.color = undefined;
+                    this.status.text = prefixText + `${onlineIcon} 0`;
+                    this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Online')}`;
+                    break;
+                default:
+                    this.status.color = this.activeExists ? this.onlineUsers[this.activeExists].selection?.color : undefined;
+                    this.status.text = prefixText + `${onlineIcon} ${count}`;
+                    const tooltip = new vscode.MarkdownString();
+                    tooltip.appendMarkdown(`${ELEGANT_NAME}: ${this.activeExists? vscode.l10n.t('Active'): vscode.l10n.t('Idle') }\n\n`);
 
-                            const jumpArgs = JSON.stringify([user.id]);
-                            const jumpCommandUri = vscode.Uri.parse(`command:${ROOT_NAME}.collaboration.jumpToUser?${encodeURIComponent(jumpArgs)}`);
-                            const docPath = user.doc_id ? this.vfs._resolveById(user.doc_id)?.path.slice(1) : undefined;
-                            const cursorInfo = user.row ? ` at <a href="${jumpCommandUri}">${docPath}#L${user.row+1}</a>` : '';
-                
-                            const since_last_update = user.last_updated_at ? formatTime(Date.now() - user.last_updated_at) : '';
-                            const timeInfo = since_last_update==='' ? vscode.l10n.t('Just now') : vscode.l10n.t('{since_last_update} ago', {since_last_update});
-                            tooltip.appendMarkdown(`${userInfo} ${cursorInfo} ${timeInfo}\n\n`);
-                        });
-                        tooltip.isTrusted = true;
-                        tooltip.supportHtml = true;
-                        this.status.tooltip = tooltip;
-                        break;
-                }
-                break;
+                    Object.values(this.onlineUsers).forEach(user => {
+                        const userArgs = JSON.stringify([`@[[${user.name}#${user.user_id}]] `]);
+                        const userCommandUri = vscode.Uri.parse(`command:${ROOT_NAME}.collaboration.insertText?${encodeURIComponent(userArgs)}`);
+                        const userInfo = `<a href=${userCommandUri}>@<span style="color:${user.selection?.color};"><b>${user.name}</b></span></a>`;
+
+                        const jumpArgs = JSON.stringify([user.id]);
+                        const jumpCommandUri = vscode.Uri.parse(`command:${ROOT_NAME}.collaboration.jumpToUser?${encodeURIComponent(jumpArgs)}`);
+                        const docPath = user.doc_id ? this.vfs._resolveById(user.doc_id)?.path.slice(1) : undefined;
+                        const cursorInfo = user.row ? ` at <a href="${jumpCommandUri}">${docPath}#L${user.row+1}</a>` : '';
+            
+                        const since_last_update = user.last_updated_at ? formatTime(Date.now() - user.last_updated_at) : '';
+                        const timeInfo = since_last_update==='' ? vscode.l10n.t('Just now') : vscode.l10n.t('{since_last_update} ago', {since_last_update});
+                        tooltip.appendMarkdown(`${userInfo} ${cursorInfo} ${timeInfo}\n\n`);
+                    });
+                    tooltip.isTrusted = true;
+                    tooltip.supportHtml = true;
+                    this.status.tooltip = tooltip;
+                    break;
+            }
         }
         
         this.status.show();

@@ -117,6 +117,13 @@ export class VirtualFileSystem extends vscode.Disposable {
     private isDirty: boolean = true;
     private initializing?: Promise<ProjectEntity>;
     private retryConnection: number = 0;
+    private retryTimer?: NodeJS.Timeout;
+    /** Whether a "Reconnecting..." notification is currently shown */
+    private reconnectingNotification: boolean = false;
+    /** Timestamp of last disconnect for debounce */
+    private lastDisconnectTime: number = 0;
+    /** Whether event handlers have been registered on the current socket */
+    private handlersRegistered: boolean = false;
     private outputBuildId?: string;
     private compileGroup?: string;
     private clsiServerId?: string;
@@ -177,63 +184,123 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     private get initializingPromise(): Promise<ProjectEntity> {
-        // if retry connection failed 3 times, throw error
-        if (this.retryConnection >= 3) {
-            this.retryConnection = 0;
-            vscode.window.showErrorMessage( vscode.l10n.t('Connection lost: {serverName}', {serverName:this.serverName}), vscode.l10n.t('Reload')).then((choice) => {
-                if (choice==='Reload') {
-                    vscode.commands.executeCommand("workbench.action.reloadWindow");
-                };
-            });
-            // reset retry connection
+        const MAX_RETRIES = 5;
+        const BASE_DELAY_MS = 1000; // 1 second base delay
+
+        // if retry connection exhausted, show error
+        if (this.retryConnection >= MAX_RETRIES) {
             this.retryConnection = 0;
             this.initializing = undefined;
+            this.reconnectingNotification = false;
+            vscode.window.showErrorMessage(
+                vscode.l10n.t('Connection lost: {serverName}', {serverName:this.serverName}),
+                vscode.l10n.t('Reload'),
+                vscode.l10n.t('Retry'),
+            ).then((choice) => {
+                if (choice === vscode.l10n.t('Reload')) {
+                    vscode.commands.executeCommand("workbench.action.reloadWindow");
+                } else if (choice === vscode.l10n.t('Retry')) {
+                    this.retryConnection = 0;
+                    this.handlersRegistered = false;
+                    this.socket.init(); // Recreate socket after all auto-reconnect attempts exhausted
+                    this.initializing = this.initializingPromise;
+                    this.init().catch(() => {});
+                }
+            });
             throw new Error( vscode.l10n.t('Connection lost') );
         }
-        // if evert connection failed, reset socketio
-        if (this.retryConnection > 0) {
-            this.socket.init();
+
+        // exponential backoff delay: 1s, 2s, 4s, 8s, 16s
+        const delayMs = this.retryConnection > 0 ? Math.min(BASE_DELAY_MS * Math.pow(2, this.retryConnection - 1), 16000) : 0;
+
+        // Show reconnecting notification on first retry
+        if (this.retryConnection === 1 && !this.reconnectingNotification) {
+            this.reconnectingNotification = true;
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: vscode.l10n.t('Reconnecting to {serverName}...', {serverName:this.serverName}),
+                cancellable: false,
+            }, async () => {
+                // Keep the notification visible while reconnecting
+                await new Promise<void>((resolve) => {
+                    const check = () => {
+                        if (this.root || this.retryConnection >= MAX_RETRIES) {
+                            this.reconnectingNotification = false;
+                            resolve();
+                        } else {
+                            setTimeout(check, 500);
+                        }
+                    };
+                    check();
+                });
+            });
         }
 
-        this.remoteWatch();
-        this.root = undefined;
-        return this.socket.joinProject(this.projectId).then(async (project) => {
-            // fetch project settings
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
-            project.settings = (await this.api.getProjectSettings(identity, this.projectId)).settings!;
-            this.root = project;
-            const activeCondition = (vscode.workspace.workspaceFolders===undefined) || (vscode.workspace.workspaceFolders?.[0].uri.scheme!==ROOT_NAME) || (vscode.workspace.workspaceFolders?.[0].uri===this.origin);
-            // Register: [collaboration] ClientManager on Statusbar
-            if (activeCondition) {
-                if (this.clientManagerItem?.triggers) {
-                    this.clientManagerItem.triggers.forEach((trigger) => trigger.dispose());
-                    delete this.clientManagerItem;
-                }
-                const clientManager = new ClientManager(this, this.context, this.publicId||'', this.socket);
-                this.clientManagerItem = {
-                    manager: clientManager,
-                    triggers: clientManager.triggers,
-                };
+        // Wait for backoff delay before retrying
+        const attemptReconnect = async (): Promise<ProjectEntity> => {
+            if (delayMs > 0) {
+                await new Promise(resolve => setTimeout(resolve, delayMs));
             }
-            // Register: [scm] SCMCollectionProvider in explorer
-            if (activeCondition) {
-                if (this.scmCollectionItem?.triggers) {
-                    this.scmCollectionItem.triggers.forEach((trigger) => trigger.dispose());
-                    delete this.scmCollectionItem;
-                }
-                const scmCollection = new SCMCollectionProvider(this, this.context);
-                this.scmCollectionItem = {
-                    collection: scmCollection,
-                    triggers: scmCollection.triggers,
-                };
+
+            // Only recreate the socket when the connection scheme has changed
+            // (e.g., v1→v2 after connectionRejected). For transient disconnects,
+            // socket.io's built-in auto-reconnect handles re-establishing the TCP
+            // connection without creating a new one — avoiding TCP RST packets.
+            if (this.socket.needsReinit) {
+                this.socket.init();
+                this.handlersRegistered = false;
             }
-            // trigger the first compile
-            vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`);
-            return project;
-        }).catch((err) => {
-            this.retryConnection += 1;
-            return this.initializingPromise;
-        });
+
+            // Register event handlers once on the current socket
+            if (!this.handlersRegistered) {
+                this.remoteWatch();
+                this.handlersRegistered = true;
+            }
+
+            this.root = undefined;
+            return this.socket.joinProject(this.projectId).then(async (project) => {
+                // Reset retry counter on success
+                this.retryConnection = 0;
+                this.reconnectingNotification = false;
+                // fetch project settings
+                const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+                project.settings = (await this.api.getProjectSettings(identity, this.projectId)).settings!;
+                this.root = project;
+                const activeCondition = (vscode.workspace.workspaceFolders===undefined) || (vscode.workspace.workspaceFolders?.[0].uri.scheme!==ROOT_NAME) || (vscode.workspace.workspaceFolders?.[0].uri===this.origin);
+                // Register: [collaboration] ClientManager on Statusbar
+                if (activeCondition) {
+                    if (this.clientManagerItem?.triggers) {
+                        this.clientManagerItem.triggers.forEach((trigger) => trigger.dispose());
+                        delete this.clientManagerItem;
+                    }
+                    const clientManager = new ClientManager(this, this.context, this.publicId||'', this.socket);
+                    this.clientManagerItem = {
+                        manager: clientManager,
+                        triggers: clientManager.triggers,
+                    };
+                }
+                // Register: [scm] SCMCollectionProvider in explorer
+                if (activeCondition) {
+                    if (this.scmCollectionItem?.triggers) {
+                        this.scmCollectionItem.triggers.forEach((trigger) => trigger.dispose());
+                        delete this.scmCollectionItem;
+                    }
+                    const scmCollection = new SCMCollectionProvider(this, this.context);
+                    this.scmCollectionItem = {
+                        collection: scmCollection,
+                        triggers: scmCollection.triggers,
+                    };
+                }
+                // trigger the first compile
+                vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`);
+                return project;
+            }).catch((err) => {
+                this.retryConnection += 1;
+                return this.initializingPromise;
+            });
+        };
+
+        return attemptReconnect();
     }
 
     get isInvisibleMode() {
@@ -241,6 +308,13 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     toggleInvisibleMode() {
+        // Clear disconnect debounce to prevent false retry trigger during mode switch
+        this.lastDisconnectTime = 0;
+        this.handlersRegistered = false; // Will re-register on the new socket scheme
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = undefined;
+        }
         this.socket.toggleAlternativeConnectionScheme(this.origin.toString(), this.root);
         this.socket.disconnect(); // jump to `onDisconnected` handler
     }
@@ -367,11 +441,31 @@ export class VirtualFileSystem extends vscode.Disposable {
             onDisconnected: () => {
                 if (this.root===undefined) { return; } // bypass the first initialization
                 console.log("Disconnected");
-                this.retryConnection += 1;
-                this.initializing = this.initializingPromise;
+                // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
+                const now = Date.now();
+                if (now - this.lastDisconnectTime < 2000) {
+                    console.log("Disconnected: debounced (too soon since last disconnect)");
+                    return;
+                }
+                this.lastDisconnectTime = now;
+                // Clear any pending retry timer
+                if (this.retryTimer) {
+                    clearTimeout(this.retryTimer);
+                }
+                // Delay reconnection attempt slightly to allow transient issues to resolve
+                this.retryTimer = setTimeout(() => {
+                    this.retryConnection += 1;
+                    this.initializing = this.initializingPromise;
+                }, 1000);
             },
             onConnectionAccepted: (publicId:string) => {
                 this.retryConnection = 0;
+                this.reconnectingNotification = false;
+                this.lastDisconnectTime = 0;
+                if (this.retryTimer) {
+                    clearTimeout(this.retryTimer);
+                    this.retryTimer = undefined;
+                }
                 this.publicId = publicId;
             },
             onFileCreated: (parentFolderId:string, type:FileType, entity:FileEntity) => {

@@ -243,7 +243,14 @@ export class BaseAPI {
     _initSocketV0(identity:Identity, query?:string) {
         const url = new URL(this.url).origin + (query ?? '');
         return (require('socket.io-client').connect as any)(url, {
-            reconnect: false,
+            // Enable auto-reconnect to avoid creating new TCP connections on transient failures.
+            // Creating new connections without proper teardown of old ones causes TCP RST packets
+            // when the server sends data on abandoned connections (see issue #309).
+            // Note: socket.io-client 0.9.x uses space-separated option names.
+            reconnect: true,
+            'reconnection delay': 1000,
+            'reconnection limit': 16000,
+            'max reconnection attempts': 10,
             'force new connection': true,
             extraHeaders: {
                 'Origin': new URL(this.url).origin,
@@ -340,68 +347,128 @@ export class BaseAPI {
         return this;
     }
 
+    /**
+     * Check if an HTTP error is transient (worth retrying).
+     * Retries on: 5xx server errors, network errors (fetch failures), and 429 rate limiting.
+     */
+    private isTransientError(statusCode: number | undefined, errorMessage?: string): boolean {
+        if (statusCode === undefined) {
+            // Network-level error (DNS, connection refused, reset, timeout)
+            return true;
+        }
+        // Server errors and rate limiting
+        if (statusCode >= 500 || statusCode === 429) {
+            return true;
+        }
+        // Common transient network error messages
+        if (errorMessage && (
+            errorMessage.includes('ECONNRESET') ||
+            errorMessage.includes('ETIMEDOUT') ||
+            errorMessage.includes('ECONNREFUSED') ||
+            errorMessage.includes('ENOTFOUND') ||
+            errorMessage.includes('socket hang up')
+        )) {
+            return true;
+        }
+        return false;
+    }
+
     protected async request(type:'GET'|'POST'|'PUT'|'DELETE', route:string, body?:FormData|object, callback?: (res?:string)=>object|undefined, extraHeaders?:object ): Promise<ResponseSchema> {
         if (this.identity===undefined) { return Promise.reject(); }
 
-        let res = undefined;
-        switch(type) {
-            case 'GET':
-                res = await fetch(this.url+route, {
-                    method: 'GET', redirect: 'manual', agent: this.agent,
-                    headers: {
-                        'Connection': 'keep-alive',
-                        'Cookie': this.identity.cookies,
-                        ...extraHeaders
-                    }
-                });
-                break;
-            case 'POST':
-                // if body is FormData, then it is a raw body
-                const content_type = body instanceof FormData ? undefined : {'Content-Type': 'application/json'};
-                const raw_body = body instanceof FormData ? body : JSON.stringify({
-                    _csrf: this.identity.csrfToken,
-                    ...body
-                });
-                res = await fetch(this.url+route, {
-                    method: 'POST', redirect: 'manual', agent: this.agent,
-                    headers: {
-                        'Connection': 'keep-alive',
-                        'Cookie': this.identity.cookies,
-                        ...content_type,
-                        ...extraHeaders
-                    },
-                    body: raw_body
-                });
-                break;
-            case 'PUT':
-                break;
-            case 'DELETE':
-                res = await fetch(this.url+route, {
-                    method: 'DELETE', redirect: 'manual', agent: this.agent,
-                    headers: {
-                        'Connection': 'keep-alive',
-                        'Cookie': this.identity.cookies,
-                        'X-Csrf-Token': this.identity.csrfToken,
-                        ...extraHeaders
-                    }
-                });
-                break;
-        };
+        const MAX_HTTP_RETRIES = 2;
+        let lastError: {statusCode?: number, message?: string} = {};
 
-        if (res && (res.status===200 || res.status===204)) {
-            const _res = res.status===200 ? await res.text() : undefined;
-            const response = callback && callback(_res);
-            return {
-                type: 'success',
-                ...response
-            } as ResponseSchema;
-        } else {
-            res = res || { status:'undefined', text:()=>'' };
-            return {
-                type: 'error',
-                message: `${res.status}: `+await res.text()
-            };
+        for (let attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
+            try {
+                let res = undefined;
+                switch(type) {
+                    case 'GET':
+                        res = await fetch(this.url+route, {
+                            method: 'GET', redirect: 'manual', agent: this.agent,
+                            headers: {
+                                'Connection': 'keep-alive',
+                                'Cookie': this.identity!.cookies,
+                                ...extraHeaders
+                            }
+                        });
+                        break;
+                    case 'POST':
+                        // if body is FormData, then it is a raw body
+                        const content_type = body instanceof FormData ? undefined : {'Content-Type': 'application/json'};
+                        const raw_body = body instanceof FormData ? body : JSON.stringify({
+                            _csrf: this.identity!.csrfToken,
+                            ...body
+                        });
+                        res = await fetch(this.url+route, {
+                            method: 'POST', redirect: 'manual', agent: this.agent,
+                            headers: {
+                                'Connection': 'keep-alive',
+                                'Cookie': this.identity!.cookies,
+                                ...content_type,
+                                ...extraHeaders
+                            },
+                            body: raw_body
+                        });
+                        break;
+                    case 'PUT':
+                        break;
+                    case 'DELETE':
+                        res = await fetch(this.url+route, {
+                            method: 'DELETE', redirect: 'manual', agent: this.agent,
+                            headers: {
+                                'Connection': 'keep-alive',
+                                'Cookie': this.identity!.cookies,
+                                'X-Csrf-Token': this.identity!.csrfToken,
+                                ...extraHeaders
+                            }
+                        });
+                        break;
+                };
+
+                if (res && (res.status===200 || res.status===204)) {
+                    const _res = res.status===200 ? await res.text() : undefined;
+                    const response = callback && callback(_res);
+                    return {
+                        type: 'success',
+                        ...response
+                    } as ResponseSchema;
+                } else if (res && this.isTransientError(res.status) && attempt < MAX_HTTP_RETRIES) {
+                    // Transient error: retry with backoff
+                    const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
+                    console.log(`HTTP ${res.status} on ${route}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
+                    lastError = {statusCode: res.status, message: await res.text().catch(() => '')};
+                    await new Promise(r => setTimeout(r, delayMs));
+                    continue;
+                } else {
+                    const resOrFallback = res || { status:'undefined', text: async () => '' };
+                    let errorBody = '';
+                    try { errorBody = await resOrFallback.text(); } catch { errorBody = ''; }
+                    return {
+                        type: 'error',
+                        message: `${resOrFallback.status}: ${errorBody}`
+                    };
+                }
+            } catch (err: any) {
+                const errMsg = err?.message || String(err);
+                if (this.isTransientError(undefined, errMsg) && attempt < MAX_HTTP_RETRIES) {
+                    const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
+                    console.log(`HTTP fetch error on ${route}: ${errMsg}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
+                    await new Promise(r => setTimeout(r, delayMs));
+                    continue;
+                }
+                return {
+                    type: 'error',
+                    message: errMsg
+                };
+            }
         }
+
+        // All retries exhausted
+        return {
+            type: 'error',
+            message: lastError.message || `Request failed after ${MAX_HTTP_RETRIES + 1} attempts`
+        };
     }
 
     protected async download(route:string) {

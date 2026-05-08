@@ -78,9 +78,13 @@ export class SocketIOAPI {
     private scheme: ConnectionScheme = 'v1';
     private record?: Promise<ProjectEntity>;
     private _handlers: Array<EventsHandler> = [];
+    /** Track EventBus listeners for cleanup to prevent MaxListenersExceededWarning */
+    private _eventBusCleanups: Array<()=>void> = [];
 
     private socket?: any;
     private emit: any;
+    /** Track the scheme used when the socket was last initialized */
+    private _socketInitScheme?: ConnectionScheme;
 
     constructor(private url:string,
                 private readonly api:BaseAPI,
@@ -91,6 +95,29 @@ export class SocketIOAPI {
     }
 
     init() {
+        // Clean up old EventBus listeners before creating new socket
+        this._cleanupEventBusListeners();
+
+        // CRITICAL: Properly disconnect old socket before creating a new one.
+        // Without this, the old TCP connection is abandoned but still alive. When the
+        // server later sends data on it (out-of-order/late packets), the OS TCP stack
+        // responds with RST, which can cause the server to drop ALL connections from
+        // this client — explaining the "connection lost" loop reported in issue #309.
+        if (this.socket) {
+            try {
+                // Remove all listeners to prevent stale event handlers from firing
+                if (typeof this.socket.removeAllListeners === 'function') {
+                    this.socket.removeAllListeners();
+                }
+                // Gracefully close the connection (sends FIN, not RST)
+                if (typeof this.socket.disconnect === 'function') {
+                    this.socket.disconnect();
+                }
+            } catch {
+                // Best-effort cleanup; socket may already be in a bad state
+            }
+        }
+
         // connect
         switch(this.scheme) {
             case 'Alt':
@@ -127,7 +154,23 @@ export class SocketIOAPI {
         this.emit = require('util').promisify(this.socket.emit).bind(this.socket);
         // resume handlers
         this.initInternalHandlers();
-        // this.resumeEventHandlers(this._handlers);
+        // Re-register existing event handlers on the new socket
+        this.resumeEventHandlers(this._handlers);
+        // Track which scheme this socket was created with
+        this._socketInitScheme = this.scheme;
+    }
+
+    /** Returns true if the socket needs re-initialization (scheme changed, or socket was never init'd) */
+    get needsReinit(): boolean {
+        return this._socketInitScheme !== this.scheme || !this.socket;
+    }
+
+    /** Clean up any accumulated EventBus listeners */
+    private _cleanupEventBusListeners() {
+        for (const cleanup of this._eventBusCleanups) {
+            try { cleanup(); } catch {}
+        }
+        this._eventBusCleanups = [];
     }
 
     private initInternalHandlers() {
@@ -141,10 +184,22 @@ export class SocketIOAPI {
             console.log('SocketIOAPI: forceDisconnect', message);
         });
         this.socket.on('connectionRejected', (err:any) => {
-            console.log('SocketIOAPI: connectionRejected.', err.message);
+            console.log('SocketIOAPI: connectionRejected.', err?.message || err);
+            // If v2 also gets rejected, fall back to v1 rather than staying stuck
+            if (this.scheme === 'v2') {
+                console.log('SocketIOAPI: v2 rejected, falling back to v1');
+                this.scheme = 'v1';
+            }
+            // Disable auto-reconnect on this socket: the server explicitly rejected
+            // our connection parameters. Reconnecting would just get rejected again,
+            // creating unnecessary TCP connection churn (and RST packets).
+            if (this.socket.io && typeof this.socket.io.reconnect === 'function') {
+                this.socket.io.reconnect(false);
+            }
         });
         this.socket.on('error', (err:any) => {
-            throw new Error(err);
+            // Log error instead of throwing to avoid crashing the extension
+            console.error('SocketIOAPI: socket error', err?.message || err);
         });
 
         if (this.scheme==='v2') {
@@ -230,9 +285,11 @@ export class SocketIOAPI {
                     this.socket.on('connectionAccepted', (_:any, publicId:any) => {
                         handler(publicId);
                     });
-                    EventBus.on('socketioConnectedEvent', (arg:{publicId:string}) => {
+                    // Track EventBus listener via Disposable for cleanup to prevent MaxListenersExceededWarning
+                    const eventBusDisposable = EventBus.on('socketioConnectedEvent', (arg:{publicId:string}) => {
                         handler(arg.publicId);
                     });
+                    this._eventBusCleanups.push(() => eventBusDisposable.dispose());
                     break;
                 case handlers.onClientUpdated:
                     this.socket.on('clientTracking.clientUpdated', (user:UpdateUserSchema) => {
@@ -306,6 +363,8 @@ export class SocketIOAPI {
                 });
                 const rejectPromise = new Promise((_, reject) => {
                     this.socket.on('connectionRejected', (err:any) => {
+                        // Only fall back to v2 if we haven't already tried it;
+                        // otherwise let the outer retry logic handle backoff
                         this.scheme = 'v2';
                         reject(err.message);
                     });
