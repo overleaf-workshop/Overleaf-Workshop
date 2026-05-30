@@ -63,6 +63,13 @@ export interface MisspellingItemSchema {
     suggestions: string[]
 }
 
+export interface UserInfoSchema {
+    id: string,
+    first_name: string,
+    last_name?: string,
+    email: string,
+}
+
 export interface MemberEntity {
     _id: string,
     first_name: string,
@@ -113,7 +120,7 @@ export interface ProjectLabelResponseSchema {
 }
 
 export interface ProjectUpdateMeta {
-    users: {id:string, first_name:string, last_name?:string, email:string}[],
+    users: UserInfoSchema[],
     start_ts: number,
     end_ts: number,
 }
@@ -157,7 +164,7 @@ export interface ProjectMessageResponseSchema {
     content: string,
     timestamp: number,
     user_id: string,
-    user: {id:string, first_name:string, last_name?:string, email:string},
+    user: UserInfoSchema,
     clientId: string,
 }
 
