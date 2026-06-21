@@ -177,24 +177,38 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         }
     }
 
-    addServer() {
-        vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Overleaf server address, e.g. "https://www.overleaf.com"')})
-        .then((url) => {
-            if (url) {
-                try {
-                    // check if url is valid
-                    const _url = new URL(url);
-                    if (!(_url.protocol==='http:' || _url.protocol==='https:')) {
-                        throw new Error( vscode.l10n.t('Invalid protocol.') );
-                    }
-                    if (GlobalStateManager.addServer(this.context, _url.host, _url.href)) {
-                        this.refresh();
-                    }
-                } catch (e) {
-                    vscode.window.showErrorMessage( vscode.l10n.t('Invalid server address.') );
-                }
+    async addServer() {
+        const url = await vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Overleaf server address, e.g. "https://www.overleaf.com"')});
+        if (!url) { return; }
+
+        let _url: URL;
+        try {
+            _url = new URL(url);
+            if (!(_url.protocol==='http:' || _url.protocol==='https:')) {
+                throw new Error( vscode.l10n.t('Invalid protocol.') );
             }
-        });
+        } catch (e) {
+            vscode.window.showErrorMessage( vscode.l10n.t('Invalid server address.') );
+            return;
+        }
+
+        // Probe the URL so the user is warned about a wrong/unreachable address.
+        const probe = await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Checking server "{url}"...', {url:_url.host}) },
+            () => GlobalStateManager.probeServer(_url.href)
+        );
+        if (!probe.reachable || !probe.isOverleaf) {
+            const reason = !probe.reachable
+                ? vscode.l10n.t('Could not reach a server at "{url}". It may be offline or the address may be wrong.', {url:_url.host})
+                : vscode.l10n.t('"{url}" responded but does not look like an Overleaf/ShareLaTeX server.', {url:_url.host});
+            const addAnyway = vscode.l10n.t('Add anyway');
+            const choice = await vscode.window.showWarningMessage(reason, addAnyway, vscode.l10n.t('Cancel'));
+            if (choice !== addAnyway) { return; }
+        }
+
+        if (GlobalStateManager.addServer(this.context, _url.host, _url.href)) {
+            this.refresh();
+        }
     }
 
     removeServer(name:string) {
@@ -224,12 +238,9 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                     GlobalStateManager.loginServer(this.context, server.api, server.name, {email, password})
                 )
                 .then(success => {
-                    if (success) {
-                        this.refresh();
-                    } else {
-                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
-                    }
-                });
+                    // The specific failure reason is reported by `loginServer`.
+                    if (success) { this.refresh(); }
+                }, () => {}); // ignore user-cancelled input box
             },
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Login with Cookies': () => {
@@ -242,12 +253,9 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                     GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies})
                 )
                 .then(success => {
-                    if (success) {
-                        this.refresh();
-                    } else {
-                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
-                    }
-                });
+                    // The specific failure reason is reported by `loginServer`.
+                    if (success) { this.refresh(); }
+                }, () => {}); // ignore user-cancelled input box
             },
         };
 
