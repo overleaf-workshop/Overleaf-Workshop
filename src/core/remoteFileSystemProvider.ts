@@ -204,23 +204,17 @@ export class VirtualFileSystem extends vscode.Disposable {
             this.root = project;
             const activeCondition = (vscode.workspace.workspaceFolders===undefined) || (vscode.workspace.workspaceFolders?.[0].uri.scheme!==ROOT_NAME) || (vscode.workspace.workspaceFolders?.[0].uri===this.origin);
             // Register: [collaboration] ClientManager on Statusbar
-            if (activeCondition) {
-                if (this.clientManagerItem?.triggers) {
-                    this.clientManagerItem.triggers.forEach((trigger) => trigger.dispose());
-                    delete this.clientManagerItem;
-                }
+            if (activeCondition && !this.clientManagerItem) {
                 const clientManager = new ClientManager(this, this.context, this.publicId||'', this.socket);
                 this.clientManagerItem = {
                     manager: clientManager,
                     triggers: clientManager.triggers,
                 };
+            } else if (activeCondition && this.clientManagerItem) {
+                this.clientManagerItem.manager.reconnect();
             }
             // Register: [scm] SCMCollectionProvider in explorer
-            if (activeCondition) {
-                if (this.scmCollectionItem?.triggers) {
-                    this.scmCollectionItem.triggers.forEach((trigger) => trigger.dispose());
-                    delete this.scmCollectionItem;
-                }
+            if (activeCondition && !this.scmCollectionItem) {
                 const scmCollection = new SCMCollectionProvider(this, this.context);
                 this.scmCollectionItem = {
                     collection: scmCollection,
@@ -282,7 +276,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         parentFolder: FolderEntity, fileEntity: FileEntity, fileType:FileType, path:string
     } | undefined {
         if (!this.root) {
-            throw vscode.FileSystemError.FileNotFound();
+            return undefined;
         }
         root = root || this.root.rootFolder[0];
         path = path || '/';

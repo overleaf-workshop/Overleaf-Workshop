@@ -58,15 +58,16 @@ export class ClientManager {
     private readonly status: vscode.StatusBarItem;
     private readonly onlineUsers: {[K:string]:ExtendedUpdateUserSchema} = {};
     private connectedFlag: boolean = true;
+    private _handlers: any;
     private readonly chatViewer: ChatViewProvider;
 
     constructor(
         private readonly vfs: VirtualFileSystem,
         private readonly context: vscode.ExtensionContext,
-        private readonly publicId: string,
-        private readonly socket: SocketIOAPI,
+        private publicId: string,
+        private socket: SocketIOAPI,
     ) {
-        this.socket.updateEventHandlers({
+        this._handlers = {
             onClientUpdated: (user:UpdateUserSchema) => {
                 if (user.id !== this.publicId) { this.setStatusActive(user.id); }
                 this.updatePosition(user.id, user.doc_id, user.row, user.column, user);
@@ -80,7 +81,8 @@ export class ClientManager {
             onConnectionAccepted: (publicId:string) => {
                 this.connectedFlag = true;
             }
-        });
+        };
+        this.socket.updateEventHandlers(this._handlers);
         this.socket.getConnectedUsers().then(users => {
             users.forEach(user => {
                 const onlineUser = {
@@ -103,6 +105,14 @@ export class ClientManager {
         this.chatViewer = new ChatViewProvider(this.vfs, this.publicId, this.context.extensionUri, this.socket);
         this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
         this.updateStatus();
+    }
+
+    reconnect() {
+        this.socket = this.vfs.socket;
+        this.publicId = this.vfs.publicId || '';
+        this.socket.updateEventHandlers(this._handlers);
+        this.connectedFlag = true;
+        this.onlineUsers = {};
     }
 
     private async jumpToUser(id?: string) {
@@ -248,7 +258,7 @@ export class ClientManager {
                 this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Not connected')}`;
                 // Kick out all users indication since the connection is lost
                 Object.keys(this.onlineUsers).forEach(clientId => {
-                    this.removePosition(clientId);
+                    try { this.removePosition(clientId); } catch (e) { /* vfs may be reconnecting */ }
                 });
                 break;
             case true:

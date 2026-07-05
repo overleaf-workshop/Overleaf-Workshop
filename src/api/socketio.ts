@@ -111,7 +111,7 @@ export class SocketIOAPI {
             const timeoutPromise = new Promise((_, reject) => {
                 setTimeout(() => {
                     reject('timeout');
-                }, 5000);
+                }, 15000);
             });
             const waitPromise = new Promise((resolve, reject) => {
                 this.socket.emit(event, ...args, (err:any, ...data:any[]) => {
@@ -144,7 +144,7 @@ export class SocketIOAPI {
             console.log('SocketIOAPI: connectionRejected.', err.message);
         });
         this.socket.on('error', (err:any) => {
-            throw new Error(err);
+            console.error('SocketIOAPI error:', err);
         });
 
         if (this.scheme==='v2') {
@@ -230,7 +230,10 @@ export class SocketIOAPI {
                     this.socket.on('connectionAccepted', (_:any, publicId:any) => {
                         handler(publicId);
                     });
-                    EventBus.on('socketioConnectedEvent', (arg:{publicId:string}) => {
+                    if (this._busConnAcceptedDisposable) {
+                        this._busConnAcceptedDisposable.dispose();
+                    }
+                    this._busConnAcceptedDisposable = EventBus.on('socketioConnectedEvent', (arg:{publicId:string}) => {
                         handler(arg.publicId);
                     });
                     break;
@@ -292,7 +295,7 @@ export class SocketIOAPI {
         const timeoutPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
             setTimeout(() => {
                 reject('timeout');
-            }, 5000);
+            }, 15000);
         });
 
         switch(this.scheme) {
@@ -305,7 +308,7 @@ export class SocketIOAPI {
                     return project;
                 });
                 const rejectPromise = new Promise((_, reject) => {
-                    this.socket.on('connectionRejected', (err:any) => {
+                    this.socket.once('connectionRejected', (err:any) => {
                         this.scheme = 'v2';
                         reject(err.message);
                     });
