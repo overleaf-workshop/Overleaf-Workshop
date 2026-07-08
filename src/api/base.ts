@@ -7,6 +7,19 @@ import { v4 as uuidv4 } from 'uuid';
 import fetch from 'node-fetch';
 import { FileEntity, FileType, FolderEntity, OutputFileEntity } from '../core/remoteFileSystemProvider';
 
+// network failure (DNS/refused/timeout/TLS), not a parseable HTTP response
+function isNetworkError(e: any): boolean {
+    return e instanceof Error && !(e as any).response && (
+        /ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|CERT_|certificate/i.test((e as any).code || '') ||
+        /network|timeout|aborted|request to .* failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|certificate/i.test(e.message)
+    );
+}
+
+// loose on purpose: a renamed tag in a newer Overleaf version must not flag a working server
+function looksLikeOverleaf(body: string): boolean {
+    return /_csrf|ol-csrfToken|ol-user_id|sharelatex|overleaf/i.test(body);
+}
+
 export interface Identity {
     csrfToken: string;
     cookies: string;
@@ -167,10 +180,13 @@ export interface ProjectSettingsSchema {
     compilers: {code:string, name:string}[],
 }
 
+export type ServerErrorType = 'unreachable' | 'not-overleaf' | 'unauthorized' | 'unknown';
+
 export interface ResponseSchema {
     type: 'success' | 'error';
     raw?: ArrayBuffer;
     message?: string;
+    errorType?: ServerErrorType;
     userInfo?: {userId:string, userEmail:string};
     identity?: Identity;
     projects?: ProjectPersist[];
@@ -201,6 +217,18 @@ export class BaseAPI {
         this.agent = new URL(url).protocol==='http:' ? new http.Agent({keepAlive: true}) : new https.Agent({keepAlive: true});
     }
 
+    // unauthenticated reachability + Overleaf check before adding a server; never throws, sends no credentials
+    async probeServer(): Promise<{reachable:boolean, isOverleaf:boolean}> {
+        try {
+            const res = await fetch(this.url+'login', {
+                method: 'GET', redirect: 'manual', agent: this.agent, timeout: 5000,
+            });
+            return { reachable: true, isOverleaf: looksLikeOverleaf(await res.text()) };
+        } catch {
+            return { reachable: false, isOverleaf: false };
+        }
+    }
+
     private async getCsrfToken(): Promise<Identity> {
         const res = await fetch(this.url+'login', {
             method: 'GET', redirect: 'manual', agent: this.agent,
@@ -208,7 +236,10 @@ export class BaseAPI {
         const body = await res.text();
         const match = body.match(/<input.*name="_csrf".*value="([^"]*)">/);
         if (!match) {
-            throw new Error('Failed to get CSRF token.');
+            // Reachable, but no Overleaf login form: wrong URL or unsupported server.
+            const err: any = new Error('Failed to get CSRF token.');
+            err.errorType = looksLikeOverleaf(body) ? 'unknown' : 'not-overleaf';
+            throw err;
         } else {
             const csrfToken = match[1];
             const cookies = res.headers.raw()['set-cookie'][0].split(';')[0];
@@ -216,7 +247,9 @@ export class BaseAPI {
         }
     }
 
-    private async getUserId(cookies:string) {
+    private async getUserId(cookies:string): Promise<
+        {ok:true, userId:string, userEmail:string, csrfToken:string} | {ok:false, error:ServerErrorType}
+    > {
         const res = await fetch(this.url+'project', {
             method: 'GET', redirect:'manual', agent: this.agent,
             headers: {
@@ -233,9 +266,13 @@ export class BaseAPI {
             const userId = userIDMatch[1];
             const csrfToken = csrfTokenMatch[1];
             const userEmail = userEmailMatch ? userEmailMatch[1] : '';
-            return {userId, userEmail, csrfToken};
+            return {ok:true, userId, userEmail, csrfToken};
         } else {
-            return undefined;
+            // not authenticated: Overleaf redirects /project to /login, so a redirect (or an
+            // Overleaf-looking page) means an invalid/expired session, not a non-Overleaf server
+            const isRedirect = res.status>=300 && res.status<400;
+            const error: ServerErrorType = (isRedirect || looksLikeOverleaf(body)) ? 'unauthorized' : 'not-overleaf';
+            return { ok:false, error };
         }
     }
 
@@ -260,19 +297,25 @@ export class BaseAPI {
     }
 
     async passportLogin(email:string, password:string): Promise<ResponseSchema> {
-        const identity = await this.getCsrfToken();
-        const res = await fetch(this.url+'login', {
-            method: 'POST', redirect: 'manual', agent: this.agent,
-            headers: {
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Content-Type': 'application/json',
-                'Cookie': identity.cookies,
-                'X-Csrf-Token': identity.csrfToken,
-            },
-            body: JSON.stringify({ _csrf: identity.csrfToken, email: email, password: password })
-        });
+        let identity: Identity;
+        let res;
+        try {
+            identity = await this.getCsrfToken();
+            res = await fetch(this.url+'login', {
+                method: 'POST', redirect: 'manual', agent: this.agent,
+                headers: {
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Content-Type': 'application/json',
+                    'Cookie': identity.cookies,
+                    'X-Csrf-Token': identity.csrfToken,
+                },
+                body: JSON.stringify({ _csrf: identity.csrfToken, email: email, password: password })
+            });
+        } catch (e:any) {
+            return { type:'error', errorType: isNetworkError(e) ? 'unreachable' : (e?.errorType ?? 'unknown') };
+        }
 
         if (res.status===302) {
             const redirect = ((await res.text()).match(/Found. Redirecting to (.*)/) as any)[1];
@@ -286,27 +329,31 @@ export class BaseAPI {
                 };
             }
         }
-        else if (res.status===200) {
+        // rejected login: `{message:{text?}}`; text may be absent (only an i18n key), so the display layer localizes
+        else if (res.status===400 || res.status===401 || res.status===200) {
+            const body = await res.json().catch(() => undefined) as any;
             return {
                 type: 'error',
-                message: (await res.json() as any).message.message
-            };
-        } else if (res.status===401) {
-            return {
-                type: 'error',
-                message: (await res.json() as any).message.text
+                errorType: 'unauthorized',
+                message: body?.message?.text ?? body?.message?.message
             };
         } else {
             return {
                 type: 'error',
-                message: `${res.status}: `+await res.text()
+                errorType: 'unknown',
+                message: `${res.status}`
             };
         }
     }
 
     async cookiesLogin(cookies: string): Promise<ResponseSchema> {
-        const res = await this.getUserId(cookies);
-        if (res) {
+        let res;
+        try {
+            res = await this.getUserId(cookies);
+        } catch (e:any) {
+            return { type:'error', errorType: isNetworkError(e) ? 'unreachable' : 'unknown' };
+        }
+        if (res.ok) {
             const { userId, userEmail, csrfToken } = res;
             const identity: Identity =  await this.updateCookies({ cookies, csrfToken });
             return {
@@ -315,9 +362,10 @@ export class BaseAPI {
                 identity: identity
             };
         } else {
+            // no message: let the display layer localize from errorType
             return {
                 type: 'error',
-                message: 'Failed to get User ID.'
+                errorType: res.error,
             };
         }
     }

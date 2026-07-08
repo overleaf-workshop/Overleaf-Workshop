@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Identity, BaseAPI, ProjectPersist } from '../api/base';
+import { Identity, BaseAPI, ProjectPersist, ServerErrorType } from '../api/base';
 import { SocketIOAPI } from '../api/socketio';
 import { ExtendedBaseAPI } from '../api/extendedBase';
 
@@ -52,6 +52,21 @@ export class GlobalStateManager {
         }
     }
 
+    // map an error category to a localized, user-facing message
+    private static loginErrorMessage(errorType?:ServerErrorType, fallback?:string): string {
+        switch (errorType) {
+            case 'unreachable':  return vscode.l10n.t('Could not reach the server. It may be offline or the address may be wrong.');
+            case 'not-overleaf': return vscode.l10n.t('The server responded but does not look like an Overleaf/ShareLaTeX server.');
+            case 'unauthorized': return fallback || vscode.l10n.t('Incorrect email/password, or your session has expired.');
+            default:             return fallback || vscode.l10n.t('Login failed.');
+        }
+    }
+
+    // reachability + Overleaf check used before adding a server
+    static async probeServer(url:string): Promise<{reachable:boolean, isOverleaf:boolean}> {
+        return new BaseAPI(url).probeServer();
+    }
+
     static addServer(context:vscode.ExtensionContext, name:string, url:string): boolean {
         const persists = context.globalState.get<ServerPersistMap>(keyServerPersists, {});
         if ( persists[name]===undefined ) {
@@ -79,7 +94,13 @@ export class GlobalStateManager {
         const server   = persists[name];
 
         if (server.login===undefined) {
-            const res = auth.cookies ? await api.cookiesLogin(auth.cookies) : await api.passportLogin(auth.email, auth.password);
+            let res;
+            try {
+                res = auth.cookies ? await api.cookiesLogin(auth.cookies) : await api.passportLogin(auth.email, auth.password);
+            } catch (e:any) {
+                vscode.window.showErrorMessage(this.loginErrorMessage('unknown'));
+                return false;
+            }
             if (res.type==='success' && res.identity!==undefined && res.userInfo!==undefined) {
                 server.login = {
                     userId: res.userInfo.userId,
@@ -89,9 +110,7 @@ export class GlobalStateManager {
                 context.globalState.update(keyServerPersists, persists);
                 return true;
             } else {
-                if (res.message!==undefined) {
-                    vscode.window.showErrorMessage(res.message);
-                }
+                vscode.window.showErrorMessage(this.loginErrorMessage(res.errorType, res.message));
                 return false;
             }
         } else {
