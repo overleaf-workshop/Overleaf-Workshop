@@ -1,11 +1,19 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import * as http from 'http';
-import * as https from 'https';
 import * as stream from 'stream';
 import * as FormData from 'form-data';
 import { v4 as uuidv4 } from 'uuid';
-import fetch from 'node-fetch';
+import { fetch } from 'undici';
 import { FileEntity, FileType, FolderEntity, OutputFileEntity } from '../core/remoteFileSystemProvider';
+
+/** Extract set-cookie headers from an undici/Response object. */
+function getSetCookie(res: any): string[] {
+    if (typeof res.headers?.getSetCookie === 'function') {
+        return res.headers.getSetCookie();
+    }
+    const raw = res.headers?.raw?.()?.['set-cookie'];
+    if (raw) return raw;
+    return [];
+}
 
 export interface Identity {
     csrfToken: string;
@@ -193,17 +201,15 @@ export interface ResponseSchema {
 
 export class BaseAPI {
     private url: string;
-    private agent: http.Agent | https.Agent;
     private identity?: Identity;
 
     constructor(url:string) {
         this.url = url;
-        this.agent = new URL(url).protocol==='http:' ? new http.Agent({keepAlive: true}) : new https.Agent({keepAlive: true});
     }
 
     private async getCsrfToken(): Promise<Identity> {
         const res = await fetch(this.url+'login', {
-            method: 'GET', redirect: 'manual', agent: this.agent,
+            method: 'GET', redirect: 'manual',
         });
         const body = await res.text();
         const match = body.match(/<input.*name="_csrf".*value="([^"]*)">/);
@@ -211,14 +217,14 @@ export class BaseAPI {
             throw new Error('Failed to get CSRF token.');
         } else {
             const csrfToken = match[1];
-            const cookies = res.headers.raw()['set-cookie'][0].split(';')[0];
+            const cookies = getSetCookie(res)[0]?.split(';')[0] ?? '';
             return { csrfToken, cookies };
         }
     }
 
     private async getUserId(cookies:string) {
         const res = await fetch(this.url+'project', {
-            method: 'GET', redirect:'manual', agent: this.agent,
+            method: 'GET', redirect:'manual',
             headers: {
                 'Connection': 'keep-alive',
                 'Cookie': cookies,
@@ -262,7 +268,7 @@ export class BaseAPI {
     async passportLogin(email:string, password:string): Promise<ResponseSchema> {
         const identity = await this.getCsrfToken();
         const res = await fetch(this.url+'login', {
-            method: 'POST', redirect: 'manual', agent: this.agent,
+            method: 'POST', redirect: 'manual',
             headers: {
                 'Accept': '*/*',
                 'Accept-Encoding': 'gzip, deflate, br',
@@ -277,7 +283,7 @@ export class BaseAPI {
         if (res.status===302) {
             const redirect = ((await res.text()).match(/Found. Redirecting to (.*)/) as any)[1];
             if (redirect==='/project') {
-                const cookies = res.headers.raw()['set-cookie'][0];
+                const cookies = getSetCookie(res)[0] ?? '';
                 return (await this.cookiesLogin(cookies));
             } else {
                 return {
@@ -326,18 +332,14 @@ export class BaseAPI {
         const res = await fetch(this.url + 'socket.io/socket.io.js', {
             method: 'GET',
             redirect: 'manual',
-            agent: this.agent,
             headers: {
                 'Connection': 'keep-alive',
                 'Cookie': identity.cookies,
             }
         });
-        const header = res.headers.raw()['set-cookie'];
-        if (header !== undefined) {
-            const cookies = header[0].split(';')[0];
-            if (cookies) {
-                identity.cookies = `${identity.cookies}; ${cookies}`;
-            }
+        const cookies = getSetCookie(res)[0]?.split(';')[0];
+        if (cookies) {
+            identity.cookies = `${identity.cookies}; ${cookies}`;
         }
         return identity;
     };
@@ -385,7 +387,7 @@ export class BaseAPI {
                 switch(type) {
                     case 'GET':
                         res = await fetch(this.url+route, {
-                            method: 'GET', redirect: 'manual', agent: this.agent,
+                            method: 'GET', redirect: 'manual',
                             headers: {
                                 'Connection': 'keep-alive',
                                 'Cookie': this.identity!.cookies,
@@ -394,14 +396,13 @@ export class BaseAPI {
                         });
                         break;
                     case 'POST':
-                        // if body is FormData, then it is a raw body
                         const content_type = body instanceof FormData ? undefined : {'Content-Type': 'application/json'};
                         const raw_body = body instanceof FormData ? body : JSON.stringify({
                             _csrf: this.identity!.csrfToken,
                             ...body
                         });
                         res = await fetch(this.url+route, {
-                            method: 'POST', redirect: 'manual', agent: this.agent,
+                            method: 'POST', redirect: 'manual',
                             headers: {
                                 'Connection': 'keep-alive',
                                 'Cookie': this.identity!.cookies,
@@ -415,7 +416,7 @@ export class BaseAPI {
                         break;
                     case 'DELETE':
                         res = await fetch(this.url+route, {
-                            method: 'DELETE', redirect: 'manual', agent: this.agent,
+                            method: 'DELETE', redirect: 'manual',
                             headers: {
                                 'Connection': 'keep-alive',
                                 'Cookie': this.identity!.cookies,
@@ -477,18 +478,18 @@ export class BaseAPI {
         let content: Buffer[] = [];
         while(true) {
             const res = await fetch(this.url+route, {
-                method: 'GET', redirect: 'manual', agent: this.agent,
+                method: 'GET', redirect: 'manual',
                 headers: {
                     'Connection': 'keep-alive',
                     'Cookie': this.identity.cookies,
                 }
             });
             if (res.status===200) {
-                content.push(await res.buffer());
+                content.push(Buffer.from(await res.arrayBuffer()));
                 break;
             }
             else if (res.status===206) {
-                content.push(await res.buffer());
+                content.push(Buffer.from(await res.arrayBuffer()));
             } else {
                 break;
             }
@@ -786,14 +787,14 @@ export class BaseAPI {
         let content: Buffer[] = [];
         while (true) {
             const res = await fetch(absoluteUrl, {
-                method: 'GET', redirect: 'manual', agent: this.agent,
+                method: 'GET', redirect: 'manual',
                 headers
             });
             if (res.status === 200) {
-                content.push(await res.buffer());
+                content.push(Buffer.from(await res.arrayBuffer()));
                 break;
             } else if (res.status === 206) {
-                content.push(await res.buffer());
+                content.push(Buffer.from(await res.arrayBuffer()));
             } else {
                 break;
             }

@@ -795,9 +795,9 @@
     "fuzzysearch": "^1.0.3",
     "mime-types": "^2.1.35",
     "minimatch": "^9.0.9",
-    "node-fetch": "^2.7.0",
     "prettier": "^3.1.1",
     "socket.io-client": "github:overleaf/socket.io-client#0.9.17-overleaf-5",
+    "undici": "^8.7.0",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
@@ -807,7 +807,6 @@
     "@types/fuzzysearch": "^1.0.2",
     "@types/mocha": "^10.0.1",
     "@types/node": "20.2.5",
-    "@types/node-fetch": "^2.6.11",
     "@types/socket.io-client": "^1.4.36",
     "@types/uuid": "^9.0.6",
     "@types/vscode": "^1.80.0",
