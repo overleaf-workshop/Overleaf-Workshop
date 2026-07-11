@@ -791,7 +791,7 @@
     "@unified-latex/unified-latex-util-parse": "^1.8.3",
     "@vscode/l10n": "^0.0.18",
     "diff-match-patch": "^1.0.5",
-    "form-data": "^4.0.4",
+    "form-data": "^4.0.6",
     "fuzzysearch": "^1.0.3",
     "mime-types": "^2.1.35",
     "minimatch": "^9.0.9",
