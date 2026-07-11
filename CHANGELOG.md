@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.10] - 2026-07-11
+### Changed
+- fix: enhance connection resilience and fix TCP RST causing spurious connection lost (fixes #309)
+  - Commit: 8ed148b99162e360948f7c0ec178f19f8a7c9868
+- fix(scm): sync on save not fs changes (fixes #323, fixes #299)
+  - Commit: debdcb5ce2b2ccfa3b0e65c3f6018f6a31c55c1e
+- fix: replace node-fetch with undici to resolve cookie login on Node 22+ (fixes #385)
+  - Commit: 3f6fd42c0cc4806cf32bae5ebaaaf1587ea39243
+
 ## [0.15.9] - 2026-05-06
 ### Added
 - feat: add editable settings for pdf viewer

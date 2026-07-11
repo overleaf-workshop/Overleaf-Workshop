@@ -2,7 +2,7 @@
   "name": "overleaf-workshop",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.15.9",
+  "version": "0.15.10",
   "icon": "resources/icons/app_icon.png",
   "author": {
     "name": "iamhyc",
