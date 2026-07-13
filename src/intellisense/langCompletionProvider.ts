@@ -370,7 +370,7 @@ export class FilePathCompletionProvider extends IntellisenseProvider implements 
     }
 }
 
-export class ReferenceCompletionProvider extends IntellisenseProvider implements vscode.CompletionItemProvider {
+export class ReferenceCompletionProvider extends IntellisenseProvider implements vscode.CompletionItemProvider, vscode.DefinitionProvider {
     protected readonly contextPrefix = [
         // group 0: reference
         ['\\w*ref'],
@@ -382,12 +382,120 @@ export class ReferenceCompletionProvider extends IntellisenseProvider implements
         super(vfsm);
     }
 
+    private normalizeRefLabel(label: string): string {
+        return label.trim().replace(/^\{+|\}+$/g, '');
+    }
+
     private parseMatch(match: RegExpMatchArray) {
         const keywords = match.slice(1, -1);
         const index = keywords.findIndex(x => x!==undefined);
         const _match = (match.at(-1) as string).split(/(.*),([^,]*)/);
         const partial = _match.length===1 ? _match[0] : _match[2];
         return {index, partial};
+    }
+
+    private getReferenceAtPosition(document: vscode.TextDocument, position: vscode.Position): { label: string } | undefined {
+        const wordRange = document.getWordRangeAtPosition(position, this.contextRegex);
+        if (!wordRange) {
+            return undefined;
+        }
+
+        const commandText = document.getText(wordRange);
+        const match = commandText.match(this.contextRegex);
+        if (!match) {
+            return undefined;
+        }
+
+        const { index } = this.parseMatch(match);
+        if (index !== 0) {
+            return undefined;
+        }
+
+        const labelsContent = match.at(-1) as string;
+        if (!labelsContent) {
+            return undefined;
+        }
+
+        const labelsStartInCommand = commandText.lastIndexOf(labelsContent);
+        if (labelsStartInCommand < 0) {
+            return undefined;
+        }
+
+        const startOffset = document.offsetAt(wordRange.start);
+        const cursorOffset = document.offsetAt(position);
+        const relativeOffset = cursorOffset - startOffset;
+        const cursorInLabels = Math.max(0, Math.min(labelsContent.length - 1, relativeOffset - labelsStartInCommand));
+
+        const tokenRegex = /[^,\s]+/g;
+        let token: RegExpExecArray | null;
+        while ((token = tokenRegex.exec(labelsContent))) {
+            const tokenStart = token.index;
+            const tokenEnd = tokenStart + token[0].length;
+            if (cursorInLabels >= tokenStart && cursorInLabels < tokenEnd) {
+                return { label: this.normalizeRefLabel(token[0]) };
+            }
+        }
+
+        return undefined;
+    }
+
+    private findLabelInDocument(document: vscode.TextDocument, label: string): vscode.Range | undefined {
+        const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`\\\\label(?:\\s*\\[[^\\]]*\\])?\\s*\\{\\s*(${escapedLabel})\\s*\\}`, 'gm');
+        const content = document.getText();
+        const match = regex.exec(content);
+        if (!match) {
+            return undefined;
+        }
+
+        const matchedLabel = match[1];
+        const labelOffsetInMatch = match[0].indexOf(matchedLabel);
+        const startOffset = match.index + Math.max(0, labelOffsetInMatch);
+        const endOffset = startOffset + matchedLabel.length;
+        return new vscode.Range(
+            document.positionAt(startOffset),
+            document.positionAt(endOffset)
+        );
+    }
+
+    private async findLabelLocation(uri: vscode.Uri, label: string): Promise<vscode.Location | undefined> {
+        const normalizedLabel = this.normalizeRefLabel(label);
+        if (!normalizedLabel) {
+            return undefined;
+        }
+
+        // Prefer open editor content so unsaved label edits are discoverable.
+        const openTexDocs = vscode.workspace.textDocuments.filter(doc =>
+            doc.uri.scheme === ROOT_NAME && doc.uri.path.endsWith('.tex')
+        );
+        const visited = new Set(openTexDocs.map(doc => doc.uri.toString()));
+        for (const doc of openTexDocs) {
+            const range = this.findLabelInDocument(doc, normalizedLabel);
+            if (range) {
+                return new vscode.Location(doc.uri, range);
+            }
+        }
+
+        const vfs = await this.vfsm.prefetch(uri);
+        const files = vfs.walk((entity) => entity.name.endsWith('.tex'));
+        for (const { path } of files) {
+            try {
+                const pathParts = path.split('/').filter(Boolean);
+                const targetUri = vfs.pathToUri(...pathParts);
+                if (visited.has(targetUri.toString())) {
+                    continue;
+                }
+                const targetDoc = await vscode.workspace.openTextDocument(targetUri);
+                const range = this.findLabelInDocument(targetDoc, normalizedLabel);
+                if (range) {
+                    return new vscode.Location(targetUri, range);
+                }
+            } catch {
+                continue;
+            }
+        }
+
+        return undefined;
     }
 
     private async getCompletionItems(uri:vscode.Uri, idx: number, partial:string): Promise<vscode.CompletionItem[]> {
@@ -454,9 +562,33 @@ export class ReferenceCompletionProvider extends IntellisenseProvider implements
         return Promise.resolve([]);
     }
 
+    async provideDefinition(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Definition | undefined> {
+        const reference = this.getReferenceAtPosition(document, position);
+        if (!reference) {
+            return undefined;
+        }
+
+        const location = await this.findLabelLocation(document.uri, reference.label);
+        if (!location) {
+            return undefined;
+        }
+
+        // Trigger SyncTeX shortly after the target is revealed by definition navigation.
+        setTimeout(() => {
+            const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
+            if (activeUri === location.uri.toString()) {
+                vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.syncCode`);
+            }
+        }, 120);
+
+        return location;
+    }
+
     get triggers(): vscode.Disposable[] {
+        const selector = {...this.selector, pattern: '**/*.{tex,txt}'};
         return [
             vscode.languages.registerCompletionItemProvider(this.selector, this, '{', ','),
+            vscode.languages.registerDefinitionProvider(selector, this),
         ];
     }
 }
