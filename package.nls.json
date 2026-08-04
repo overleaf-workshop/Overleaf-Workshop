@@ -50,6 +50,7 @@
     "commands.collaboration.jumpToUser.title": "Jump to Collaborator ...",
 
     "configuration.compileOnSave.enabled.markdownDescription": "Always update the compiled PDF when a file is saved.",
+    "configuration.localReplica.syncOnFileChange.enabled.markdownDescription": "Sync Local Replica changes made by external tools. (Take effect after restarting VSCode)",
     "configuration.compileOutputFolderName.markdownDescription": "The name of the folder where the compiled output files (e.g., `output.pdf`) is located. (Take effect after restarting VSCode)",
     "configuration.pdfViewer.themes.markdownDescription": "Configure the color themes used by the PDF viewer. (Take effect after restarting VSCode)",
     "configuration.pdfViewer.themes.theme.description": "The name of the theme.",

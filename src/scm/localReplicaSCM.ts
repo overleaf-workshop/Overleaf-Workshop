@@ -40,7 +40,6 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     private baseCache: {[key:string]: Uint8Array} = {};
     private vfsWatcher?: vscode.FileSystemWatcher;
     private localWatcher?: vscode.FileSystemWatcher;
-    private saveListener?: vscode.Disposable;
     private ignorePatterns: string[] = [
         '**/.*',
         '**/.*/**',
@@ -376,24 +375,27 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         );
         await this.overwrite();
 
-        // Listen for explicit user saves (not file system changes) to push local edits.
-        // File system watchers would also fire for git operations, compilation outputs,
-        // and other external modifications, causing unwanted sync (issues #299, #323).
-        this.saveListener = vscode.workspace.onDidSaveTextDocument(
-            doc => this.onDocumentSaved(doc)
-        );
+        const syncOnFileChange = vscode.workspace
+            .getConfiguration('overleaf-workshop.localReplica.syncOnFileChange')
+            .get<boolean>('enabled', false);
+
+        // By default, only explicit editor saves push file modifications. Users who
+        // rely on external tools can opt into file-system change events instead.
+        // Keep these listeners mutually exclusive so an editor save is not pushed twice.
+        const localChangeListener = syncOnFileChange
+            ? this.localWatcher.onDidChange(async uri => await this.syncToVFS(uri, 'update'))
+            : vscode.workspace.onDidSaveTextDocument(doc => this.onDocumentSaved(doc));
 
         return [
             // sync from vfs to local
             this.vfsWatcher.onDidChange(async uri => await this.syncFromVFS(uri, 'update')),
             this.vfsWatcher.onDidCreate(async uri => await this.syncFromVFS(uri, 'update')),
             this.vfsWatcher.onDidDelete(async uri => await this.syncFromVFS(uri, 'delete')),
-            // sync from local to vfs: file updates via editor saves (onDidSaveTextDocument above),
-            // file creation and deletion still via watcher (these are explicit user actions)
+            // sync from local to vfs: file updates use the configured listener above;
+            // file creation and deletion still always use the file-system watcher
+            localChangeListener,
             this.localWatcher.onDidCreate(async uri => await this.syncToVFS(uri, 'update')),
             this.localWatcher.onDidDelete(async uri => await this.syncToVFS(uri, 'delete')),
-            // include save listener for proper disposal
-            this.saveListener,
         ];
     }
 
