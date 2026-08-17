@@ -146,6 +146,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     public static async pathToUri(path: string): Promise<vscode.Uri | undefined> {
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri;
         if (workspaceRoot===undefined || workspaceRoot?.scheme!=='file') { return undefined; }
+        if (path.replace(/\\/g, '/').split('/').some(part => part.startsWith('.'))) { return undefined; }
 
         const settingUri = vscode.Uri.joinPath(workspaceRoot, '.overleaf/settings.json');
         try {
@@ -163,7 +164,9 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         const settingUri = vscode.Uri.joinPath(workspaceRoot, '.overleaf/settings.json');
         try {
             await vscode.workspace.fs.stat(settingUri);
-            return uri.path.slice(workspaceRoot.path.length);
+            const path = uri.path.slice(workspaceRoot.path.length);
+            if (path.replace(/\\/g, '/').split('/').some(part => part.startsWith('.'))) { return undefined; }
+            return path;
         } catch (error) {
             return undefined;
         }
