@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
+import { error as logError, notifyError } from '../utils/outputChannel';
 import * as DiffMatchPatch from 'diff-match-patch';
 import { EventEmitter } from 'events';
 import { BaseAPI, Identity, ProjectMessageResponseSchema, ProjectSettingsSchema } from './base';
@@ -57,14 +58,21 @@ class SyncTimer {
         private _interval: number,
         private readonly _callback: () => Promise<void>,
     ) {
-        this._callback().then(() => this.trigger());
+        this.runCallback();
+    }
+
+    private async runCallback() {
+        try {
+            await this._callback();
+        } catch (error) {
+            notifyError('Overleaf background refresh failed. See the Overleaf Workshop output log.', error, 'alternative-refresh-failed');
+        } finally {
+            this.trigger();
+        }
     }
 
     private trigger() {
-        this.timer = setTimeout(async () => {
-            await this._callback();
-            this.trigger();
-        }, this._interval);
+        this.timer = setTimeout(() => this.runCallback(), this._interval);
     }
 
     set interval(value: number) {
@@ -146,11 +154,13 @@ export class SocketIOAlt {
     private async refreshVFS() {
         const vfs = await this.vfs;
         const latestVersion = await vfs.getCurrentVersion();
+        if (latestVersion===undefined) { return; }
         if (this.vfsLocalVersion===undefined) { this.vfsLocalVersion = latestVersion; }
         if (latestVersion===this.vfsLocalVersion) { return; }
 
         const activeUsers = [];
-        const diffs = (await vfs.getFileTreeDiff(this.vfsLocalVersion, latestVersion))?.diff;
+        const cachedDiff = vfs.getRecentFileTreeDiff(this.vfsLocalVersion, latestVersion);
+        const diffs = (cachedDiff ?? await vfs.getFileTreeDiff(this.vfsLocalVersion, latestVersion))?.diff;
         for (const diff of diffs || []) {
             if (diff.operation===undefined) { continue; }
 
@@ -161,7 +171,7 @@ export class SocketIOAlt {
                 const {fileType, fileEntity, fileId} = await vfs._resolveUri(vfsUri);
                 [entityId, entity] = [fileId, fileEntity];
             } catch (error) {
-                console.error(error);
+                logError(error);
             }
 
             // handle vfs update
@@ -339,7 +349,10 @@ export class SocketIOAlt {
                 }
             }
             // update local version
-            this.vfsLocalVersion = await vfs.getCurrentVersion();
+            const latestVersion = await vfs.getCurrentVersion();
+            if (latestVersion!==undefined) {
+                this.vfsLocalVersion = latestVersion;
+            }
             return Promise.resolve();
         });
     }

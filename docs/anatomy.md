@@ -283,10 +283,9 @@ It also proxies commands for `class HistoryDataProvider` via `(get) triggers`.
 #### `src/scm/localReplicaSCM.ts`
 The exported `LocalReplicaSCMProvider` implements the `BaseSCM` interface and supports the ["Open Project Locally"](wiki.md#open-project-locally) feature.
 
-Since the local filesystem keeps no version information, at the start of project open, it always apply `this.overwrite` to overwrite local changes with overleaf server version.
-Therefore, if there is a network disturbance, your local changes or remote changes (by other collaborators) will be lost depending on `syncFromVFS` is called via `this.vfsWatcher` firstly, or `syncToVFS` is called via `this.localWatcher` firstly.
+The provider persists the last synchronized Overleaf project version and SHA-256 hashes in `.overleaf/sync-state.json`. On project open or reconnect, it reuses recent project-history updates to determine both the current version and changed paths. A separate file-tree diff request is only made when those updates do not cover the stored checkpoint. History requests are serialized and rate-limit responses use server-directed backoff. A full remote-to-local synchronization is used when no valid state exists or the history diff is unavailable.
 
-A smarter solution is proposed in `(private async) overwrite`, but is not applied in the `this.writeFile`.
+If the same text file changed locally and remotely, the existing `diff-match-patch` merge strategy is applied using the previous remote version as the base. If a reliable base cannot be retrieved, the remote version remains authoritative, matching the previous initialization behavior.
 
 #### `src/scm/localGitBridgeSCM.ts`
 > Not completed now. Target to provide local git bridge via [isomorphic-git](https://github.com/isomorphic-git/isomorphic-git) without local file system or git client binary needed.

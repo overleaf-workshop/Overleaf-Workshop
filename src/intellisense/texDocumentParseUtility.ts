@@ -1,5 +1,6 @@
 import type * as Ast from '@unified-latex/unified-latex-types';
 import * as unifiedLaTeXParse from '@unified-latex/unified-latex-util-parse';
+import { error } from '../utils/outputChannel';
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export enum TeXElementType { Environment, Command, Section, SectionAst, SubFile, BibItem, BibField, BibFile};
@@ -317,7 +318,7 @@ export async function genTexElements(documentText: string): Promise<TeXElement[]
             await parseNode(node, resElement);
         }
         catch (e) {
-            console.error(e);
+            error(e);
         }
     }
 

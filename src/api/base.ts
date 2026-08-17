@@ -1,9 +1,9 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import * as stream from 'stream';
-import * as FormData from 'form-data';
+import { Blob } from 'buffer';
 import { v4 as uuidv4 } from 'uuid';
-import { fetch } from 'undici';
+import { fetch, FormData } from 'undici';
 import { FileEntity, FileType, FolderEntity, OutputFileEntity } from '../core/remoteFileSystemProvider';
+import { log } from '../utils/outputChannel';
 
 /** Extract set-cookie headers from an undici/Response object. */
 function getSetCookie(res: any): string[] {
@@ -177,6 +177,7 @@ export interface ProjectSettingsSchema {
 
 export interface ResponseSchema {
     type: 'success' | 'error';
+    statusCode?: number;
     raw?: ArrayBuffer;
     message?: string;
     userInfo?: {userId:string, userEmail:string};
@@ -202,6 +203,44 @@ export interface ResponseSchema {
 export class BaseAPI {
     private url: string;
     private identity?: Identity;
+    private historyRequestChain: Promise<void> = Promise.resolve();
+    private lastHistoryRequestAt = 0;
+
+    private isHistoryRoute(route: string): boolean {
+        return route.includes('/updates?') || route.includes('/filetree/diff?') || route.includes('/diff?');
+    }
+
+    private async waitForHistoryRequest() {
+        const previous = this.historyRequestChain;
+        let release!: () => void;
+        this.historyRequestChain = new Promise<void>(resolve => { release = resolve; });
+        await previous;
+        try {
+            const minimumIntervalMs = 3000;
+            const delayMs = Math.max(0, minimumIntervalMs - (Date.now() - this.lastHistoryRequestAt));
+            if (delayMs>0) {
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+            this.lastHistoryRequestAt = Date.now();
+        } finally {
+            release();
+        }
+    }
+
+    private retryAfterMs(response: any, attempt: number): number {
+        const retryAfter = response.headers?.get?.('retry-after');
+        if (retryAfter!==undefined && retryAfter!==null) {
+            const seconds = Number(retryAfter);
+            if (Number.isFinite(seconds)) {
+                return Math.max(1000, seconds*1000);
+            }
+            const retryAt = Date.parse(retryAfter);
+            if (Number.isFinite(retryAt)) {
+                return Math.max(1000, retryAt-Date.now());
+            }
+        }
+        return 5000 * Math.pow(2, attempt);
+    }
 
     constructor(url:string) {
         this.url = url;
@@ -383,6 +422,9 @@ export class BaseAPI {
 
         for (let attempt = 0; attempt <= MAX_HTTP_RETRIES; attempt++) {
             try {
+                if (this.isHistoryRoute(route)) {
+                    await this.waitForHistoryRequest();
+                }
                 let res = undefined;
                 switch(type) {
                     case 'GET':
@@ -436,8 +478,8 @@ export class BaseAPI {
                     } as ResponseSchema;
                 } else if (res && this.isTransientError(res.status) && attempt < MAX_HTTP_RETRIES) {
                     // Transient error: retry with backoff
-                    const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
-                    console.log(`HTTP ${res.status} on ${route}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
+                    const delayMs = res.status===429 ? this.retryAfterMs(res, attempt) : Math.min(1000 * Math.pow(2, attempt), 4000);
+                    log(`HTTP ${res.status} on ${route}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
                     lastError = {statusCode: res.status, message: await res.text().catch(() => '')};
                     await new Promise(r => setTimeout(r, delayMs));
                     continue;
@@ -447,6 +489,7 @@ export class BaseAPI {
                     try { errorBody = await resOrFallback.text(); } catch { errorBody = ''; }
                     return {
                         type: 'error',
+                        statusCode: typeof resOrFallback.status==='number' ? resOrFallback.status : undefined,
                         message: `${resOrFallback.status}: ${errorBody}`
                     };
                 }
@@ -454,12 +497,13 @@ export class BaseAPI {
                 const errMsg = err?.message || String(err);
                 if (this.isTransientError(undefined, errMsg) && attempt < MAX_HTTP_RETRIES) {
                     const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
-                    console.log(`HTTP fetch error on ${route}: ${errMsg}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
+                    log(`HTTP fetch error on ${route}: ${errMsg}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
                     await new Promise(r => setTimeout(r, delayMs));
                     continue;
                 }
                 return {
                     type: 'error',
+                    statusCode: undefined,
                     message: errMsg
                 };
             }
@@ -468,6 +512,7 @@ export class BaseAPI {
         // All retries exhausted
         return {
             type: 'error',
+            statusCode: lastError.statusCode,
             message: lastError.message || `Request failed after ${MAX_HTTP_RETRIES + 1} attempts`
         };
     }
@@ -598,13 +643,14 @@ export class BaseAPI {
     }
 
     async uploadFile(identity:Identity, projectId:string, parentFolderId:string, filename:string, fileContent:Uint8Array) {
-        const fileStream = stream.Readable.from(fileContent);
         const formData = new FormData();
         const mimeType = require('mime-types').lookup(filename);
         formData.append('targetFolderId', parentFolderId);
         formData.append('name', filename);
         formData.append('type', mimeType? mimeType : 'text/plain');
-        formData.append('qqfile', fileStream, {filename});
+        formData.append('qqfile', new Blob([Buffer.from(fileContent)], {
+            type: mimeType ? mimeType : 'application/octet-stream',
+        }), filename);
 
         this.setIdentity(identity);
         return this.request('POST', `project/${projectId}/upload?folder_id=${parentFolderId}`, formData, (res) => {
@@ -616,9 +662,10 @@ export class BaseAPI {
 
     async uploadProject(identity:Identity, filename:string, fileContent:Uint8Array) {
         const uuid = uuidv4();
-        const fileStream = stream.Readable.from(fileContent);
         const formData = new FormData();
-        formData.append('qqfile', fileStream, {filename});
+        formData.append('qqfile', new Blob([Buffer.from(fileContent)], {
+            type: 'application/zip',
+        }), filename);
 
         this.setIdentity(identity);
         return this.request('POST', `project/new/upload?_csrf=${identity.csrfToken}&qquuid=${uuid}&qqfilename=${filename}&qqtotalfilesize=${fileContent.length}`, formData, (res) => {

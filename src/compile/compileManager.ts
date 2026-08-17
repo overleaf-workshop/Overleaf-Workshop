@@ -5,6 +5,7 @@ import { PdfDocument } from '../core/pdfViewEditorProvider';
 import { LatexParser, ErrorSchema } from './compileLogParser';
 import { EventBus } from '../utils/eventBus';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import { error as logError, warn } from '../utils/outputChannel';
 
 // map string level to severity
 const severityMap: Record<string, vscode.DiagnosticSeverity> = {
@@ -297,7 +298,7 @@ export class CompileManager {
         const lineIndex = targetLine - 1;
 
         if (lineIndex < 0 || lineIndex >= editor.document.lineCount) {
-            console.warn(`${ELEGANT_NAME}: Invalid line number ${targetLine} for revealing in editor. Document has ${editor.document.lineCount} lines.`);
+            warn(`${ELEGANT_NAME}: Invalid line number ${targetLine} for revealing in editor. Document has ${editor.document.lineCount} lines.`);
             // Optionally, just focus the editor if the line is invalid
             vscode.window.showTextDocument(editor.document, { viewColumn: editor.viewColumn, preserveFocus: false });
             return;
@@ -352,13 +353,13 @@ export class CompileManager {
                                     }
                                 },
                                 (error) => {
-                                    console.error(`${ELEGANT_NAME}: Failed to open document ${fileUri.fsPath} for syncPdf:`, error);
+                                    logError(`${ELEGANT_NAME}: Failed to open document ${fileUri.fsPath} for syncPdf:`, error);
                                 }
                             );
                     }
                 })
                 .catch(error => {
-                    console.error(`${ELEGANT_NAME}: Error in syncPdf promise chain:`, error);
+                    logError(`${ELEGANT_NAME}: Error in syncPdf promise chain:`, error);
                 });
         }
     }

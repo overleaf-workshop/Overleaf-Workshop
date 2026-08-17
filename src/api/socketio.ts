@@ -2,6 +2,7 @@
 import { Identity, BaseAPI, ProjectMessageResponseSchema } from './base';
 import { FileEntity, DocumentEntity, FileRefEntity, FileType, FolderEntity, ProjectEntity } from '../core/remoteFileSystemProvider';
 import { EventBus } from '../utils/eventBus';
+import { log, notifyError } from '../utils/outputChannel';
 import { SocketIOAlt } from './socketioAlt';
 
 function decodePackedUtf8(text: string): string {
@@ -75,7 +76,7 @@ export interface EventsHandler {
 type ConnectionScheme = 'Alt' | 'v1' | 'v2';
 
 export class SocketIOAPI {
-    private scheme: ConnectionScheme = 'v1';
+    private scheme: ConnectionScheme;
     private record?: Promise<ProjectEntity>;
     private _handlers: Array<EventsHandler> = [];
     /** Track EventBus listeners for cleanup to prevent MaxListenersExceededWarning */
@@ -91,6 +92,11 @@ export class SocketIOAPI {
                 private readonly identity:Identity,
                 private readonly projectId:string)
     {
+        try {
+            this.scheme = new URL(url).hostname==='www.overleaf.com' ? 'v2' : 'v1';
+        } catch {
+            this.scheme = 'v1';
+        }
         this.init();
     }
 
@@ -175,19 +181,19 @@ export class SocketIOAPI {
 
     private initInternalHandlers() {
         this.socket.on('connect', () => {
-            console.log('SocketIOAPI: connected');
+            log('SocketIOAPI: connected');
         });
         this.socket.on('connect_failed', () => {
-            console.log('SocketIOAPI: connect_failed');
+            log('SocketIOAPI: connect_failed');
         });
         this.socket.on('forceDisconnect', (message:string, delay=10) => {
-            console.log('SocketIOAPI: forceDisconnect', message);
+            log('SocketIOAPI: forceDisconnect', message);
         });
         this.socket.on('connectionRejected', (err:any) => {
-            console.log('SocketIOAPI: connectionRejected.', err?.message || err);
+            log('SocketIOAPI: connectionRejected.', err?.message || err);
             // If v2 also gets rejected, fall back to v1 rather than staying stuck
             if (this.scheme === 'v2') {
-                console.log('SocketIOAPI: v2 rejected, falling back to v1');
+                log('SocketIOAPI: v2 rejected, falling back to v1');
                 this.scheme = 'v1';
             }
             // Disable auto-reconnect on this socket: the server explicitly rejected
@@ -199,16 +205,20 @@ export class SocketIOAPI {
         });
         this.socket.on('error', (err:any) => {
             // Log error instead of throwing to avoid crashing the extension
-            console.error('SocketIOAPI: socket error', err?.message || err);
+            const message = err?.message || String(err);
+            notifyError(`Overleaf connection error: ${message}`, undefined, 'socketio-error');
         });
 
         if (this.scheme==='v2') {
-            this.record = new Promise(resolve => {
+            this.record = new Promise((resolve, reject) => {
                 this.socket.on('joinProjectResponse', (res:any) => {
                     const publicId = res.publicId as string;
                     const project = res.project as ProjectEntity;
                     EventBus.fire('socketioConnectedEvent', {publicId});
                     resolve(project);
+                });
+                this.socket.on('connectionRejected', (err:any) => {
+                    reject(err?.message || err);
                 });
             });
         }

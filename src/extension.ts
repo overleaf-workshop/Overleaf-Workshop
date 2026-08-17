@@ -7,8 +7,13 @@ import { PdfViewEditorProvider } from './core/pdfViewEditorProvider';
 import { CompileManager } from './compile/compileManager';
 import { LangIntellisenseProvider } from './intellisense';
 import { LocalReplicaSCMProvider } from './scm/localReplicaSCM';
+import { initOutputChannel, log } from './utils/outputChannel';
 
 export function activate(context: vscode.ExtensionContext) {
+    // Keep extension diagnostics in a selectable channel in the Output view.
+    initOutputChannel(context);
+    log('Overleaf Workshop local sync build 2026-08-17.2 activated.');
+
     // Register: [core] RemoteFileSystemProvider
     const remoteFileSystemProvider = new RemoteFileSystemProvider(context);
     context.subscriptions.push( ...remoteFileSystemProvider.triggers );

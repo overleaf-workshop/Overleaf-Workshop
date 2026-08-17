@@ -4,6 +4,7 @@ src/**
 patches/**
 docs/**
 .gitignore
+AGENTS.md
 .yarnrc
 **/tsconfig.json
 **/.eslintrc.json

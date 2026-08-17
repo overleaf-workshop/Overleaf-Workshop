@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
 import * as DiffMatchPatch from 'diff-match-patch';
-import { BaseAPI, MemberEntity, ProjectSettingsSchema } from '../api/base';
+import { BaseAPI, MemberEntity, ProjectFileTreeDiffResponseSchema, ProjectSettingsSchema, ProjectUpdateResponseSchema } from '../api/base';
 import { SocketIOAPI, UpdateSchema } from '../api/socketio';
 import { OUTPUT_FOLDER_NAME, ROOT_NAME } from '../consts';
 import { GlobalStateManager } from '../utils/globalStateManager';
@@ -9,6 +9,7 @@ import { ClientManager } from '../collaboration/clientManager';
 import { EventBus } from '../utils/eventBus';
 import { SCMCollectionProvider } from '../scm/scmCollectionProvider';
 import { ExtendedBaseAPI, ProjectLinkedFileProvider, UrlLinkedFileProvider } from '../api/extendedBase';
+import { error, log, notifyError, warn } from '../utils/outputChannel';
 
 const __OUTPUTS_ID = `${ROOT_NAME}-outputs`;
 
@@ -109,6 +110,7 @@ export function parseUri(uri: vscode.Uri) {
 export class VirtualFileSystem extends vscode.Disposable {
     private root?: ProjectEntity;
     private currentVersion?: number;
+    private recentUpdates?: ProjectUpdateResponseSchema;
     private context: vscode.ExtensionContext;
     private api: BaseAPI;
     private socket: SocketIOAPI;
@@ -440,11 +442,11 @@ export class VirtualFileSystem extends vscode.Disposable {
         this.socket.updateEventHandlers({
             onDisconnected: () => {
                 if (this.root===undefined) { return; } // bypass the first initialization
-                console.log("Disconnected");
+                log("Disconnected");
                 // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
                 const now = Date.now();
                 if (now - this.lastDisconnectTime < 2000) {
-                    console.log("Disconnected: debounced (too soon since last disconnect)");
+                    log("Disconnected: debounced (too soon since last disconnect)");
                     return;
                 }
                 this.lastDisconnectTime = now;
@@ -536,15 +538,20 @@ export class VirtualFileSystem extends vscode.Disposable {
                         // if doc dirty, local cache should diverge from remote cache
                         if (_doc && !_doc.isDirty) {doc.localCache = content;}
                         doc.remoteCache = content;
-                        this.isDirty = true;
-                        this.notify([
-                            {type: vscode.FileChangeType.Changed, uri: this.pathToUri(res.path)}
-                        ]);
+                    } else {
+                        // The document has not been opened yet. Invalidate its
+                        // lazy cache so the file watcher can fetch it on demand.
+                        doc.remoteCache = undefined;
+                        doc.localCache = undefined;
                     }
                 } else {
                     doc.remoteCache = undefined;
                     doc.localCache = undefined;
                 }
+                this.isDirty = true;
+                this.notify([
+                    {type: vscode.FileChangeType.Changed, uri: this.pathToUri(res.path)}
+                ]);
             },
             onSpellCheckLanguageUpdated: (language:string) => {
                 if (this.root) {
@@ -660,13 +667,16 @@ export class VirtualFileSystem extends vscode.Disposable {
             throw vscode.FileSystemError.FileExists(uri);
         }
 
-        let res = undefined;
+        let res: FileEntity | undefined;
+        let failureMessage: string | undefined;
         const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
 
         if (content.length===0) {
             const _res = await this.api.addDoc(identity, this.projectId, parentFolder._id, fileName);
             if (_res.type==='success') {
                 res = _res.entity;
+            } else {
+                failureMessage = _res.message;
             }
         } else {
             const parentFolderId = parentFolder._id;
@@ -674,9 +684,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             if (_res.type==='success' && _res.entity!==undefined) {
                 res = _res.entity;
             } else {
-                if (_res.message!==undefined) {
-                    vscode.window.showErrorMessage(_res.message);
-                }
+                failureMessage = _res.message;
             }
         }
         if (res && res._type) {
@@ -684,7 +692,11 @@ export class VirtualFileSystem extends vscode.Disposable {
             this.notify([
                 {type: vscode.FileChangeType.Created, uri: uri},
             ]);
+            return;
         }
+        throw vscode.FileSystemError.Unavailable(
+            failureMessage || vscode.l10n.t('Failed to create {fileName}', {fileName})
+        );
     }
 
     async refreshLinkedFile(uri: vscode.Uri) {
@@ -836,6 +848,9 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (fileType && fileType==='doc' && fileEntity) {
             const doc = fileEntity as DocumentEntity;
             const _content = new TextDecoder().decode(content);
+            if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
+                await this.openFile(uri);
+            }
             if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
                 return;
             }
@@ -989,7 +1004,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 if (rootEntry?.path) {
                     rootResourcePath = rootEntry.path.replace(/^\//, '');
                 } else {
-                    console.warn(`Unable to resolve root document id '${resolvedRootDocId}' to a path; compiling without explicit rootResourcePath.`);
+                    warn(`Unable to resolve root document id '${resolvedRootDocId}' to a path; compiling without explicit rootResourcePath.`);
                 }
             }
             const res = await this.api.compile(identity, this.projectId, rootResourcePath, draft, stopOnFirstError);
@@ -1002,7 +1017,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 return true;
             } else {
                 if (res.message!==undefined) {
-                    console.error('Compile failure.', res.message);
+                    error('Compile failure.', res.message);
                 }
                 return false;
             }
@@ -1210,58 +1225,79 @@ export class VirtualFileSystem extends vscode.Disposable {
         const res = await this.api.proxyToHistoryApiAndGetFileDiff(identity, this.projectId, pathname, from, to);
         if (res.type==='success') {
             return res.diff;
-        } else {
+        } else if (res.statusCode===404) {
             return undefined;
+        } else {
+            const message = `Failed to fetch file history: ${res.message || 'unknown error'}`;
+            notifyError('Overleaf history request failed. See the Overleaf Workshop output log.', message, `file-history:${res.statusCode || 'unknown'}`);
+            throw new Error(message);
         }
     }
 
     async getFileTreeDiff(from:number, to:number) {
+        if (from>=to) {
+            return {diff: []};
+        }
         const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
         const res = await this.api.proxyToHistoryApiAndGetFileTreeDiff(identity, this.projectId, from, to);
         if (res.type==='success') {
             return res.treeDiff;
-        } else {
+        } else if (res.statusCode===404) {
             return undefined;
+        } else {
+            const message = `Failed to fetch file tree history: ${res.message || 'unknown error'}`;
+            notifyError('Overleaf history request failed. See the Overleaf Workshop output log.', message, `file-tree-history:${res.statusCode || 'unknown'}`);
+            throw new Error(message);
         }
     }
 
     async getCurrentVersion() {
-        const base = this.currentVersion ?? 0;
-        let lb = base;
-        let rb = base+2**4;
-        // firstly try: a) no update `+1`, b) one update `+2`
-        const res = await this.getFileTreeDiff(base+1, base+1);
-        if (res===undefined) {
-            this.currentVersion = base;
-            return base;
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const res = await this.api.proxyToHistoryApiAndGetUpdates(identity, this.projectId);
+        if (res.type!=='success' || res.updates===undefined) {
+            notifyError('Overleaf could not determine the current project version. Startup sync was paused.', res.message, 'current-version-unavailable');
+            return undefined;
         }
-        const res2 = await this.getFileTreeDiff(base+2, base+2);
-        if (res2===undefined) {
-            this.currentVersion = base+1;
-            return this.currentVersion;
+
+        this.recentUpdates = res.updates;
+        const latestVersion = res.updates.updates.at(0)?.toV ?? 0;
+        if (!Number.isInteger(latestVersion) || latestVersion<0) {
+            notifyError('Overleaf returned an invalid project version. Startup sync was paused.', undefined, 'current-version-invalid');
+            return undefined;
         }
-        // locate the actual upper bound
-        do {
-            const res = await this.getFileTreeDiff(rb, rb);
-            if (res!==undefined) {
-                rb = lb + (rb-lb)*2;
-            } else {
-                break;
-            }
-        } while (true);
-        // binary search the current version
-        while (lb<rb) {
-            const mid = Math.floor((lb+rb)/2);
-            const res = await this.getFileTreeDiff(mid, mid);
-            if (res!==undefined) {
-                lb = mid+1;
-            } else {
-                rb = mid;
-            }
-        }
-        // update current version
-        this.currentVersion = rb-1;
+        this.currentVersion = latestVersion;
         return this.currentVersion;
+    }
+
+    getRecentFileTreeDiff(from: number, to: number): ProjectFileTreeDiffResponseSchema | undefined {
+        if (from>=to) { return {diff: []}; }
+        const updates = this.recentUpdates?.updates
+            ?.filter(update => update.toV>from && update.fromV<=to)
+            .sort((a, b) => a.fromV-b.fromV);
+        if (updates===undefined || updates.length===0) { return undefined; }
+
+        let coveredUntil = from;
+        for (const update of updates) {
+            if (update.fromV>coveredUntil) { return undefined; }
+            coveredUntil = Math.max(coveredUntil, update.toV);
+        }
+        if (coveredUntil<to) { return undefined; }
+
+        const operations = new Map<string, 'edited'|'added'|'removed'>();
+        for (const update of updates) {
+            for (const pathname of update.pathnames || []) {
+                operations.set(pathname, 'edited');
+            }
+            for (const operation of update.project_ops || []) {
+                if (operation.add?.pathname!==undefined) {
+                    operations.set(operation.add.pathname, 'added');
+                }
+                if (operation.remove?.pathname!==undefined) {
+                    operations.set(operation.remove.pathname, 'removed');
+                }
+            }
+        }
+        return {diff: [...operations.entries()].map(([pathname, operation]) => ({pathname, operation}))};
     }
 
     async createLabel(comment: string, version: number) {

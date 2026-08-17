@@ -323,6 +323,10 @@ In the Local Replica configuration, you can choose to enable/disable the Local R
 
 ![screenshot-config-local-replica](assets/screenshot-config-local-replica.png)
 
+Changes made to files in the local replica by other applications are also detected and uploaded automatically, including while the VS Code window is in the background. Synchronization is driven by VS Code file-system events and does not require an editor save or window focus. Files matching the Local Replica ignore patterns are excluded. Synchronization diagnostics are available in the `Overleaf Workshop` channel in the Output view.
+
+After the first synchronization, `.overleaf/sync-state.json` records the last Overleaf project version and SHA-256 hashes of synchronized files. Subsequent project opens and reconnects reuse the latest history update response for both the current version and changed paths when possible, so unchanged file contents are not downloaded and an additional file-tree diff request is avoided. History requests are serialized and rate-limit responses honor `Retry-After`. State changes produced by startup reconciliation are batched into one write, unchanged state is not rewritten, and the disposable cache is written in place so it does not repeatedly appear as delete/create events. If synchronization ultimately fails, a deduplicated VS Code error notification links to the `Overleaf Workshop` output log. Local symbolic links and paths below symbolic-link directories are excluded from upload, download, deletion, and sync state.
+
 The project-related metadata for local replica are located in `.overleaf/settings.json` in the following format:
 ```json
 {
