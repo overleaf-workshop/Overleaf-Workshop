@@ -4,6 +4,7 @@
 
 - Runtime local changes are event-driven through VS Code `FileSystemWatcher`; do not add periodic directory or hash polling.
 - `.overleaf/sync-state.json` stores the remote history version and SHA-256 content baseline used only for startup/reconnect reconciliation.
+- `.overleaf/settings.json` is the authoritative local-replica association. It must contain enough project URI and SCM settings metadata to rebuild the transient per-login project/SCM state after authentication expires.
 - Batch startup state changes into one write and skip writes when serialized state is unchanged; do not rewrite the state file once per synchronized path. The file is a disposable cache, so write it in place to avoid delete/create watcher events.
 - History API failures such as HTTP 429 must not be interpreted as a missing version. Leave the checkpoint unchanged and retry on a later reconnect.
 - Reuse recent history updates for both version discovery and changed-path collection. Serialize unavoidable history requests and honor `Retry-After` instead of issuing immediate parallel probes.

@@ -198,6 +198,42 @@ export class GlobalStateManager {
         }
     }
 
+    /**
+     * Recreates the in-memory project entry needed by SCMCollectionProvider
+     * from a local replica's .overleaf/settings.json after a re-login.
+     */
+    static async restoreLocalReplicaSCM(
+        context:vscode.ExtensionContext,
+        serverName:string,
+        projectId:string,
+        projectName:string,
+        userId:string|undefined,
+        scmKey:string,
+        scmPersist:ProjectSCMPersist,
+    ): Promise<boolean> {
+        const persists = context.globalState.get<ServerPersistMap>(keyServerPersists, {});
+        const server = persists[serverName];
+        if (server?.login===undefined) { return false; }
+        server.login.projects ??= [];
+        let project = server.login.projects.find(item => item.id===projectId);
+        if (project===undefined) {
+            project = {
+                id: projectId,
+                userId: userId || server.login.userId,
+                name: projectName,
+                source: 'owner',
+                accessLevel: 'owner',
+                scm: {},
+            };
+            server.login.projects.push(project);
+        }
+        const scmPersists = (project.scm ?? {}) as ProjectSCMPersistMap;
+        scmPersists[scmKey] = scmPersist;
+        project.scm = scmPersists;
+        await context.globalState.update(keyServerPersists, persists);
+        return true;
+    }
+
     static getPdfViewPersist(context:vscode.ExtensionContext, uri:string): any {
         return context.globalState.get<PdfViewPersistMap>(keyPdfViewPersists, {})[uri]?.state;
     }

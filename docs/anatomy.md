@@ -285,6 +285,8 @@ The exported `LocalReplicaSCMProvider` implements the `BaseSCM` interface and su
 
 The provider persists the last synchronized Overleaf project version and SHA-256 hashes in `.overleaf/sync-state.json`. On project open or reconnect, it reuses recent project-history updates to determine both the current version and changed paths. A separate file-tree diff request is only made when those updates do not cover the stored checkpoint. All HTTP requests share one process-wide queue, and rate-limit responses pause that queue according to `Retry-After`. A full remote-to-local synchronization is allowed only when the local replica is empty or still matches its checkpoint. If history is unavailable while local files changed, or if the same path changed on both sides, synchronization pauses without modifying either side.
 
+The local workspace association is stored in `.overleaf/settings.json`, independently of authentication credentials. When a local replica is reopened after login expiry, the extension rebuilds its transient project/SCM entry from this file and reconnects after the user logs in again; the user does not need to repeat `Open Project Locally`.
+
 If the same text file changed locally and remotely, the existing `diff-match-patch` merge strategy is applied using the previous remote version as the base. If a reliable base cannot be retrieved, the remote version remains authoritative, matching the previous initialization behavior.
 
 #### `src/scm/localGitBridgeSCM.ts`

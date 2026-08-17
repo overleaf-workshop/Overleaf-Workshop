@@ -778,6 +778,21 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         return this.incrementalSync(state, currentRemoteVersion, localHashes, remoteDiff);
     }
 
+    private async persistLocalSettingsMetadata() {
+        const settingUri = vscode.Uri.joinPath(this.baseUri, '.overleaf/settings.json');
+        try {
+            const current = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(settingUri)));
+            const settings = this.vfs.getProjectSCMPersist(this.scmKey)?.settings ?? {};
+            if (current.localReplica!==undefined && JSON.stringify(current.localReplica.settings ?? {})===JSON.stringify(settings)) {
+                return;
+            }
+            current.localReplica = {settings};
+            await vscode.workspace.fs.writeFile(settingUri, new TextEncoder().encode(JSON.stringify(current, null, 4)));
+        } catch (error) {
+            logError('Could not update local replica metadata in .overleaf/settings.json.', error);
+        }
+    }
+
     private bypassSync(action:'push'|'pull', type:'update'|'delete', relPath: string, content?: Uint8Array): boolean {
         // bypass ignore files
         if (this.matchIgnorePatterns(relPath)) {
@@ -914,15 +929,18 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         try {
             await vscode.workspace.fs.stat(settingUri);
         } catch (error) {
+            const scmPersist = this.vfs.getProjectSCMPersist(this.scmKey);
             await vscode.workspace.fs.writeFile(settingUri, Buffer.from(
                 JSON.stringify({
                     'uri': this.vfs.origin.toString(),
                     'serverName': this.vfs.serverName,
                     'enableCompileNPreview': false,
                     'projectName': this.vfs.projectName,
+                    'localReplica': {settings: scmPersist?.settings ?? {}},
                 }, null, 4)
             ));
         }
+        await this.persistLocalSettingsMetadata();
 
         this.vfsWatcher = vscode.workspace.createFileSystemWatcher(
             new vscode.RelativePattern( this.vfs.origin, '**/*' )
@@ -1063,6 +1081,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                         const index = ignorePatterns.indexOf(item.label);
                         ignorePatterns.splice(index, 1);
                         await this.setSetting(IGNORE_SETTING_KEY, ignorePatterns);
+                        await this.persistLocalSettingsMetadata();
                         quickPick.items = ignorePatterns.map(pattern => ({
                             label: pattern,
                             buttons: [{iconPath: new vscode.ThemeIcon('trash')}],
@@ -1075,6 +1094,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                             if (pattern!=='') {
                                 ignorePatterns.push(pattern);
                                 await this.setSetting(IGNORE_SETTING_KEY, ignorePatterns);
+                                await this.persistLocalSettingsMetadata();
                                 quickPick.items = ignorePatterns.map(pattern => ({
                                     label: pattern,
                                     buttons: [{iconPath: new vscode.ThemeIcon('trash')}],

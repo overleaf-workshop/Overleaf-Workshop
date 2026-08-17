@@ -226,6 +226,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                 .then(success => {
                     if (success) {
                         this.refresh();
+                        vscode.commands.executeCommand(`${ROOT_NAME}.localReplica.activate`, true);
                     } else {
                         vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
                     }
@@ -244,6 +245,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                 .then(success => {
                     if (success) {
                         this.refresh();
+                        vscode.commands.executeCommand(`${ROOT_NAME}.localReplica.activate`, true);
                     } else {
                         vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
                     }

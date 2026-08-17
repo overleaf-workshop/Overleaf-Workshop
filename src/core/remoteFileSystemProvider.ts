@@ -149,7 +149,11 @@ export class VirtualFileSystem extends vscode.Disposable {
             this.scmCollectionItem?.triggers.forEach((trigger) => trigger.dispose());
             this.scmCollectionItem = undefined;
             // disconnect socketio
-            // this.socket.disconnect();
+            if (this.retryTimer!==undefined) {
+                clearTimeout(this.retryTimer);
+                this.retryTimer = undefined;
+            }
+            this.socket?.disconnect();
         });
 
         const {userId,projectId,serverName,projectName} = parseUri(uri);
@@ -1386,6 +1390,15 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
         return this.getVFS(uri).then((vfs) => {return vfs;});
     }
 
+    reset(uri: vscode.Uri) {
+        const key = uri.query;
+        const vfs = this.vfss[key];
+        if (vfs!==undefined) {
+            vfs.dispose();
+            delete this.vfss[key];
+        }
+    }
+
     notify(events :vscode.FileChangeEvent[]) {
         this._emitter.fire(events);
     }
@@ -1443,6 +1456,9 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
             }),
             vscode.commands.registerCommand('remoteFileSystem.prefetch', (uri: vscode.Uri) => {
                 return this.prefetch(uri);
+            }),
+            vscode.commands.registerCommand('remoteFileSystem.reset', (uri: vscode.Uri) => {
+                this.reset(uri);
             }),
         ];
     }
