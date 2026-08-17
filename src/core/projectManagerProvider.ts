@@ -569,6 +569,69 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         });
     }
 
+    private async promptForLocalReplicaPath(projectName: string): Promise<vscode.Uri | undefined> {
+        const inputBox = LocalReplicaSCMProvider.baseUriInputBox;
+        inputBox.ignoreFocusOut = true;
+        inputBox.title = vscode.l10n.t('Create Source Control: {scm}', {scm:LocalReplicaSCMProvider.label});
+        inputBox.buttons = [{iconPath: new vscode.ThemeIcon('check')}];
+
+        const selectedPath = await new Promise<string | undefined>(resolve => {
+            let settled = false;
+            const finish = (value?: string) => {
+                if (settled) { return; }
+                settled = true;
+                resolve(value);
+                inputBox.hide();
+            };
+            inputBox.onDidTriggerButton(() => finish(inputBox.value));
+            inputBox.onDidAccept(() => {
+                if (inputBox.activeItems.length===0) {
+                    finish(inputBox.value);
+                }
+            });
+            inputBox.onDidHide(() => finish());
+            inputBox.show();
+        });
+        inputBox.dispose();
+        if (!selectedPath) { return undefined; }
+
+        log('ProjectManager: validating local replica path', {projectName, path:selectedPath});
+        return LocalReplicaSCMProvider.validateBaseUri(selectedPath, projectName);
+    }
+
+    private async createLocalReplica(vfs: VirtualFileSystem): Promise<boolean> {
+        const baseUri = await this.promptForLocalReplicaPath(vfs.projectName);
+        if (baseUri===undefined) { return false; }
+
+        const scm = new LocalReplicaSCMProvider(vfs, baseUri);
+        vfs.setProjectSCMPersist(scm.scmKey, {
+            enabled: true,
+            label: LocalReplicaSCMProvider.label,
+            baseUri: scm.baseUri.path,
+            settings: {} as JSON,
+        });
+
+        let triggers: vscode.Disposable[] = [];
+        try {
+            triggers = await scm.triggers;
+            log('ProjectManager: local replica created', {
+                projectId: vfs.projectId,
+                baseUri: baseUri.toString(),
+                triggerCount: triggers.length,
+            });
+            vscode.window.showInformationMessage(vscode.l10n.t('"{scm}" created: {uri}.', {
+                scm: LocalReplicaSCMProvider.label,
+                uri: decodeURI(baseUri.toString()),
+            }));
+            return true;
+        } catch (error) {
+            vfs.setProjectSCMPersist(scm.scmKey, undefined);
+            throw error;
+        } finally {
+            triggers.forEach(trigger => trigger.dispose());
+        }
+    }
+
     async openProjectLocalReplica(project: ProjectItem) {
         log('ProjectManager: Open Project Locally started', {projectId: project.pid, projectName: project.label, uri: project.uri});
         let openInNewWindow = false;
@@ -595,36 +658,44 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
             const parsed = vscode.Uri.parse(scmPersist.baseUri);
             return parsed.scheme==='' ? vscode.Uri.file(scmPersist.baseUri) : parsed;
         };
+        const usableReplicaRecords = async (candidates: typeof replicas) => {
+            const usable = [] as typeof replicas;
+            for (const replica of candidates) {
+                try {
+                    const stat = await vscode.workspace.fs.stat(replicaUri(replica));
+                    if (stat.type===vscode.FileType.Directory) { usable.push(replica); }
+                } catch {
+                    // Keep the persisted entry untouched; the user may recreate it.
+                }
+            }
+            return usable;
+        };
         // A persisted SCM entry can outlive its directory. Treat that as no
         // usable replica so the normal create-local-folder prompt is shown.
-        const usableReplicas = [] as typeof replicas;
-        for (const replica of replicas) {
-            try {
-                const stat = await vscode.workspace.fs.stat(replicaUri(replica));
-                if (stat.type===vscode.FileType.Directory) { usableReplicas.push(replica); }
-            } catch {
-                // Keep the persisted entry untouched; the user may recreate it.
-            }
-        }
-        replicas = usableReplicas;
+        replicas = await usableReplicaRecords(replicas);
         // if not exist, create new one
         if (replicas.length===0) {
             const vfs = (await (await vscode.commands.executeCommand('remoteFileSystem.prefetch', uri))) as VirtualFileSystem;
-            await vfs.init();
-            log('ProjectManager: remote project initialized for local replica creation', {projectId, projectName: project.label});
-            const answer = await vscode.window.showWarningMessage( vscode.l10n.t('No local replica found, create one for project "{label}" ?', {label:project.label}), "Yes", "No");
-            if (answer === "Yes") {
-                await (await vscode.commands.executeCommand(`${ROOT_NAME}.projectSCM.newSCM`, LocalReplicaSCMProvider));
-                // fetch local replica scm again
-                scmPersists = GlobalStateManager.getServerProjectSCMPersists(this.context, serverName, projectId);
-                replicas = Object.values(scmPersists).filter(scmPersist => scmPersist.label===LocalReplicaSCMProvider.label);
-                if (replicas.length===0) {
-                    notifyError('Local replica creation did not produce a usable SCM record. See the Overleaf Workshop output for details.', undefined, 'local-replica-create-empty');
+            try {
+                await vfs.init({activateWorkspaceFeatures:false});
+                log('ProjectManager: remote project initialized for local replica creation', {projectId, projectName: project.label});
+                const answer = await vscode.window.showWarningMessage( vscode.l10n.t('No local replica found, create one for project "{label}" ?', {label:project.label}), "Yes", "No");
+                if (answer === "Yes") {
+                    const created = await this.createLocalReplica(vfs);
+                    if (!created) { return; }
+                    // fetch local replica scm again
+                    scmPersists = GlobalStateManager.getServerProjectSCMPersists(this.context, serverName, projectId);
+                    replicas = Object.values(scmPersists).filter(scmPersist => scmPersist.label===LocalReplicaSCMProvider.label);
+                    replicas = await usableReplicaRecords(replicas);
+                    if (replicas.length===0) {
+                        notifyError('Local replica creation did not produce a usable SCM record. See the Overleaf Workshop output for details.', undefined, 'local-replica-create-empty');
+                        return;
+                    }
+                } else {
                     return;
                 }
-            } else {
+            } finally {
                 await vscode.commands.executeCommand('remoteFileSystem.reset', uri);
-                return;
             }
         }
 

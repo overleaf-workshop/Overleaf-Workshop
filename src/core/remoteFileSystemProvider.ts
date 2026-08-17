@@ -123,6 +123,8 @@ export class VirtualFileSystem extends vscode.Disposable {
     /** Whether a "Reconnecting..." notification is currently shown */
     private reconnectingNotification: boolean = false;
     private disposed: boolean = false;
+    private workspaceFeaturesRequested: boolean = false;
+    private workspaceFeaturesSuppressed: boolean = false;
     /** Timestamp of last disconnect for debounce */
     private lastDisconnectTime: number = 0;
     /** Whether event handlers have been registered on the current socket */
@@ -180,18 +182,79 @@ export class VirtualFileSystem extends vscode.Disposable {
         return this.userId;
     }
 
-    async init() : Promise<ProjectEntity> {
+    async init(options: {activateWorkspaceFeatures?: boolean} = {}) : Promise<ProjectEntity> {
+        if (options.activateWorkspaceFeatures===false) {
+            this.workspaceFeaturesSuppressed = true;
+            this.workspaceFeaturesRequested = false;
+        } else if (options.activateWorkspaceFeatures===true) {
+            this.workspaceFeaturesSuppressed = false;
+            this.workspaceFeaturesRequested = true;
+        } else if (!this.workspaceFeaturesSuppressed) {
+            this.workspaceFeaturesRequested = true;
+        }
         if (this.disposed) {
             throw new Error('VirtualFileSystem has been disposed.');
         }
         if (this.root) {
-            return Promise.resolve(this.root);
+            if (this.workspaceFeaturesRequested) {
+                await this.activateWorkspaceFeatures();
+            }
+            return this.root;
         }
 
         if (!this.initializing) {
             this.initializing = this.initializingPromise;
         }
         return this.initializing;
+    }
+
+    private async belongsToActiveWorkspace(): Promise<boolean> {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders===undefined || workspaceFolders.length===0) { return true; }
+        if (workspaceFolders.length!==1) { return false; }
+
+        const workspaceUri = workspaceFolders[0].uri;
+        if (workspaceUri.scheme===ROOT_NAME) {
+            return workspaceUri.authority===this.origin.authority && workspaceUri.query===this.origin.query;
+        }
+        if (workspaceUri.scheme!=='file') { return false; }
+
+        try {
+            const settingUri = vscode.Uri.joinPath(workspaceUri, '.overleaf/settings.json');
+            const content = await vscode.workspace.fs.readFile(settingUri);
+            const setting = JSON.parse(new TextDecoder().decode(content));
+            if (typeof setting.uri!=='string') { return false; }
+            const configuredUri = vscode.Uri.parse(setting.uri);
+            const configured = parseUri(configuredUri);
+            return configured.serverName===this.serverName && configured.projectId===this.projectId;
+        } catch {
+            return false;
+        }
+    }
+
+    private async activateWorkspaceFeatures(): Promise<void> {
+        if (!await this.belongsToActiveWorkspace()) {
+            log('VirtualFileSystem: skipped workspace feature registration for background project', {
+                serverName: this.serverName,
+                projectId: this.projectId,
+            });
+            return;
+        }
+
+        if (this.clientManagerItem===undefined) {
+            const clientManager = new ClientManager(this, this.context, this.publicId||'', this.socket);
+            this.clientManagerItem = {
+                manager: clientManager,
+                triggers: clientManager.triggers,
+            };
+        }
+        if (this.scmCollectionItem===undefined) {
+            const scmCollection = new SCMCollectionProvider(this, this.context);
+            this.scmCollectionItem = {
+                collection: scmCollection,
+                triggers: scmCollection.triggers,
+            };
+        }
     }
 
     private get initializingPromise(): Promise<ProjectEntity> {
@@ -280,58 +343,52 @@ export class VirtualFileSystem extends vscode.Disposable {
             }
 
             this.root = undefined;
-            return this.socket.joinProject(this.projectId).then(async (project) => {
+            const attempt = this.retryConnection + 1;
+            let project: ProjectEntity;
+            try {
+                project = await this.socket.joinProject(this.projectId);
                 log('VirtualFileSystem: joinProject succeeded', {
                     serverName: this.serverName,
                     projectId: this.projectId,
                     scheme: this.socket.connectionScheme,
                 });
-                // Reset retry counter on success
-                this.retryConnection = 0;
-                this.reconnectingNotification = false;
-                // fetch project settings
                 const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
                 project.settings = (await this.api.getProjectSettings(identity, this.projectId)).settings!;
-                this.root = project;
-                const activeCondition = (vscode.workspace.workspaceFolders===undefined) || (vscode.workspace.workspaceFolders?.[0].uri.scheme!==ROOT_NAME) || (vscode.workspace.workspaceFolders?.[0].uri===this.origin);
-                // Register: [collaboration] ClientManager on Statusbar
-                if (activeCondition) {
-                    if (this.clientManagerItem?.triggers) {
-                        this.clientManagerItem.triggers.forEach((trigger) => trigger.dispose());
-                        delete this.clientManagerItem;
-                    }
-                    const clientManager = new ClientManager(this, this.context, this.publicId||'', this.socket);
-                    this.clientManagerItem = {
-                        manager: clientManager,
-                        triggers: clientManager.triggers,
-                    };
-                }
-                // Register: [scm] SCMCollectionProvider in explorer
-                if (activeCondition) {
-                    if (this.scmCollectionItem?.triggers) {
-                        this.scmCollectionItem.triggers.forEach((trigger) => trigger.dispose());
-                        delete this.scmCollectionItem;
-                    }
-                    const scmCollection = new SCMCollectionProvider(this, this.context);
-                    this.scmCollectionItem = {
-                        collection: scmCollection,
-                        triggers: scmCollection.triggers,
-                    };
-                }
-                // trigger the first compile
-                vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`);
-                return project;
-            }).catch((err) => {
+            } catch (err) {
                 error('VirtualFileSystem: project initialization failed', {
                     serverName: this.serverName,
                     projectId: this.projectId,
-                    attempt: this.retryConnection + 1,
+                    attempt,
                     scheme: this.socket.connectionScheme,
                     error: err,
                 });
+                if (this.disposed) { throw err; }
                 this.retryConnection += 1;
                 return this.initializingPromise;
-            });
+            }
+
+            this.root = project;
+            if (this.workspaceFeaturesRequested) {
+                try {
+                    await this.activateWorkspaceFeatures();
+                } catch (err) {
+                    error('VirtualFileSystem: workspace feature initialization failed', {
+                        serverName: this.serverName,
+                        projectId: this.projectId,
+                        scheme: this.socket.connectionScheme,
+                        error: err,
+                    });
+                    this.initializing = undefined;
+                    throw err;
+                }
+            }
+
+            this.retryConnection = 0;
+            this.reconnectingNotification = false;
+            if (this.clientManagerItem!==undefined || this.scmCollectionItem!==undefined) {
+                vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`);
+            }
+            return project;
         };
 
         return attemptReconnect();

@@ -13,6 +13,7 @@
 - Report final user-actionable failures through a deduplicated VS Code notification with access to the Output log; individual retries remain log-only.
 - Connection and SCM creation logs must include project ID, connection scheme, retry attempt, local base URI, and the original structured error. Never swallow `joinProject` or trigger-initialization errors behind a generic reconnecting message.
 - Disposing a cached VFS is terminal: disconnect handlers must not schedule reconnects after disposal. Successful `Open Project Locally` creation must leave its provider-owned VFS alive.
+- A background project used by `Open Project Locally` must not register workspace-global commands, views, status items, or compile actions. Those features belong only to the project identified by the active workspace; deterministic feature-registration failures must not enter the connection retry loop.
 - Ignore every path containing a dot-prefixed component, including `.output`, before any stat/read/write work.
 - Ignore symbolic links and paths below symbolic-link directories in both directions. Never upload them, overwrite/delete them during a pull, or include them in sync state.
 - Never choose a winner or synthesize a merge when both sides changed. Pause that path, preserve both sides, notify the user, and require manual resolution followed by a window reload. Do not create conflict-copy files.

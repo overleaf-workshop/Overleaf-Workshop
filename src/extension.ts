@@ -15,7 +15,7 @@ let localReplicaActivation: Promise<void> | undefined;
 export function activate(context: vscode.ExtensionContext) {
     // Keep extension diagnostics in a selectable channel in the Output view.
     initOutputChannel(context);
-    log('Overleaf Workshop local sync build 2026-08-17.6 activated.');
+    log('Overleaf Workshop local sync build 2026-08-17.8 activated.');
 
     // Register: [core] RemoteFileSystemProvider
     const remoteFileSystemProvider = new RemoteFileSystemProvider(context);
