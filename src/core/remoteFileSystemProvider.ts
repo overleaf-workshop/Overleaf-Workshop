@@ -118,6 +118,8 @@ export class VirtualFileSystem extends vscode.Disposable {
     private initializing?: Promise<ProjectEntity>;
     private retryConnection: number = 0;
     private retryTimer?: NodeJS.Timeout;
+    private readonly documentsRequiringJoin = new Set<string>();
+    private reconnecting: boolean = false;
     /** Whether a "Reconnecting..." notification is currently shown */
     private reconnectingNotification: boolean = false;
     /** Timestamp of last disconnect for debounce */
@@ -173,7 +175,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async init() : Promise<ProjectEntity> {
-        if (this.root) {
+        if (this.root && !this.reconnecting) {
             return Promise.resolve(this.root);
         }
 
@@ -257,7 +259,9 @@ export class VirtualFileSystem extends vscode.Disposable {
                 this.handlersRegistered = true;
             }
 
-            this.root = undefined;
+            if (!this.reconnecting) {
+                this.root = undefined;
+            }
             return this.socket.joinProject(this.projectId).then(async (project) => {
                 // Reset retry counter on success
                 this.retryConnection = 0;
@@ -266,6 +270,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
                 project.settings = (await this.api.getProjectSettings(identity, this.projectId)).settings!;
                 this.root = project;
+                this.reconnecting = false;
                 const activeCondition = (vscode.workspace.workspaceFolders===undefined) || (vscode.workspace.workspaceFolders?.[0].uri.scheme!==ROOT_NAME) || (vscode.workspace.workspaceFolders?.[0].uri===this.origin);
                 // Register: [collaboration] ClientManager on Statusbar
                 if (activeCondition) {
@@ -441,31 +446,21 @@ export class VirtualFileSystem extends vscode.Disposable {
             onDisconnected: () => {
                 if (this.root===undefined) { return; } // bypass the first initialization
                 console.log("Disconnected");
-                // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
-                const now = Date.now();
-                if (now - this.lastDisconnectTime < 2000) {
-                    console.log("Disconnected: debounced (too soon since last disconnect)");
-                    return;
-                }
-                this.lastDisconnectTime = now;
-                // Clear any pending retry timer
-                if (this.retryTimer) {
-                    clearTimeout(this.retryTimer);
-                }
-                // Delay reconnection attempt slightly to allow transient issues to resolve
-                this.retryTimer = setTimeout(() => {
-                    this.retryConnection += 1;
-                    this.initializing = this.initializingPromise;
-                }, 1000);
+                this.markDocumentsForRejoin();
+                if (this.reconnecting) { return; }
+                this.reconnecting = true;
+                this.initializing = new Promise<ProjectEntity>((resolve, reject) => {
+                    this.retryTimer = setTimeout(() => {
+                        this.retryTimer = undefined;
+                        this.retryConnection += 1;
+                        Promise.resolve().then(() => this.initializingPromise).then(resolve, reject);
+                    }, 1000);
+                });
             },
             onConnectionAccepted: (publicId:string) => {
                 this.retryConnection = 0;
                 this.reconnectingNotification = false;
                 this.lastDisconnectTime = 0;
-                if (this.retryTimer) {
-                    clearTimeout(this.retryTimer);
-                    this.retryTimer = undefined;
-                }
                 this.publicId = publicId;
             },
             onFileCreated: (parentFolderId:string, type:FileType, entity:FileEntity) => {
@@ -568,6 +563,12 @@ export class VirtualFileSystem extends vscode.Disposable {
         });
     }
 
+    private markDocumentsForRejoin(folder: FolderEntity | undefined = this.root?.rootFolder[0]): void {
+        if (!folder) { return; }
+        folder.docs.forEach(doc => this.documentsRequiringJoin.add(doc._id));
+        folder.folders.forEach(child => this.markDocumentsForRejoin(child));
+    }
+
     pathToUri(...path: string[]): vscode.Uri {
         return vscode.Uri.joinPath(this.origin, ...path);
     }
@@ -614,7 +615,7 @@ export class VirtualFileSystem extends vscode.Disposable {
 
         if (fileType==='doc') {
             const doc = fileEntity as DocumentEntity;
-            if (doc.remoteCache!==undefined) {
+            if (doc.remoteCache!==undefined && !this.documentsRequiringJoin.has(doc._id)) {
                 const content = doc.remoteCache;
                 EventBus.fire('fileWillOpenEvent', {uri});
                 return new TextEncoder().encode(content);
@@ -624,6 +625,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 doc.version = res.version;
                 doc.remoteCache = content;
                 doc.localCache  = content;
+                this.documentsRequiringJoin.delete(doc._id);
                 EventBus.fire('fileWillOpenEvent', {uri});
                 return new TextEncoder().encode(content);
             }
@@ -836,18 +838,31 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (fileType && fileType==='doc' && fileEntity) {
             const doc = fileEntity as DocumentEntity;
             const _content = new TextDecoder().decode(content);
-            if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
-                return;
+            if (this.documentsRequiringJoin.has(doc._id)) {
+                await this.init();
             }
+            if (this.documentsRequiringJoin.has(doc._id) || doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
+                const localCache = doc.localCache;
+                const res = await this.socket.joinDoc(doc._id);
+                const remoteCache = res.docLines.join('\n');
+                doc.version = res.version;
+                doc.lastVersion = undefined;
+                doc.localCache = localCache ?? remoteCache;
+                doc.remoteCache = remoteCache;
+                this.documentsRequiringJoin.delete(doc._id);
+            }
+            const localCache = doc.localCache!;
+            const remoteCache = doc.remoteCache!;
+            const version = doc.version!;
             const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(doc.localCache,  doc.remoteCache);
+            const patches = dmp.patch_make(localCache, remoteCache);
 
             const mergeResArray = dmp.patch_apply(patches, _content);
             const mergeRes = mergeResArray[0] as string;
             const update = {
                 doc: doc._id,
                 lastV: doc.lastVersion,
-                v: doc.version,
+                v: version,
                 // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
                 hash: (()=>{
                     if (!doc.mtime || Date.now()-doc.mtime>5000) {
@@ -858,7 +873,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                     }
                 })() as string,
                 op: (()=>{
-                    const remoteCacheAscii = Buffer.from(doc.remoteCache, 'utf-8').toString('utf-8');
+                    const remoteCacheAscii = Buffer.from(remoteCache, 'utf-8').toString('utf-8');
                     const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
                     let currentPos = 0;
                     return dmp.diff_main(remoteCacheAscii, mergeResAscii)
