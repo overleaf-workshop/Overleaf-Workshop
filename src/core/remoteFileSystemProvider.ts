@@ -854,11 +854,19 @@ export class VirtualFileSystem extends vscode.Disposable {
             if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
                 return;
             }
+            // `content` is the caller's complete desired file. Applying a
+            // local-to-remote patch to it reverses the direction and can send
+            // stale remote text back to Overleaf. Treat a divergent remote
+            // cache as a conflict instead of guessing how to merge it.
+            if (doc.localCache!==doc.remoteCache) {
+                if (_content===doc.remoteCache) {
+                    doc.localCache = _content;
+                    return;
+                }
+                throw vscode.FileSystemError.Unavailable('The remote document changed while the local document was being updated.');
+            }
             const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(doc.localCache,  doc.remoteCache);
-
-            const mergeResArray = dmp.patch_apply(patches, _content);
-            const mergeRes = mergeResArray[0] as string;
+            const mergeRes = _content;
             const update = {
                 doc: doc._id,
                 lastV: doc.lastVersion,
@@ -893,7 +901,12 @@ export class VirtualFileSystem extends vscode.Disposable {
                                 .filter(x => x) as any;
                 })(),
             };
-            this.isDirty = (update.op && update.op.length) ? true : false;
+            if (!update.op || update.op.length===0) {
+                doc.localCache = mergeRes;
+                doc.remoteCache = mergeRes;
+                return;
+            }
+            this.isDirty = true;
             await this.socket.applyOtUpdate(doc._id, update);
             doc.localCache = mergeRes;
             doc.remoteCache = mergeRes;

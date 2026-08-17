@@ -567,11 +567,19 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
     }
 
     async openProjectLocalReplica(project: ProjectItem) {
-        // should close other open vfs firstly
+        let openInNewWindow = false;
+        // A remote Overleaf folder cannot share the same workspace with a local
+        // replica. Offer a new window instead of silently returning before the
+        // local-replica creation prompt is reached.
         const vfsFolder = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme===ROOT_NAME);
         if (vfsFolder) {
-            vscode.window.showWarningMessage( vscode.l10n.t('Please close the open remote overleaf folder firstly.') );
-            return;
+            const answer = await vscode.window.showWarningMessage(
+                vscode.l10n.t('An Overleaf project is already open in this window.'),
+                vscode.l10n.t('Open Local Replica in New Window'),
+                vscode.l10n.t('Cancel')
+            );
+            if (answer!==vscode.l10n.t('Open Local Replica in New Window')) { return; }
+            openInNewWindow = true;
         }
 
         const uri = vscode.Uri.parse(project.uri);
@@ -579,6 +587,22 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         // fetch existing local replica scm
         let scmPersists = GlobalStateManager.getServerProjectSCMPersists(this.context, serverName, projectId);
         let replicas = Object.values(scmPersists).filter(scmPersist => scmPersist.label===LocalReplicaSCMProvider.label);
+        const replicaUri = (scmPersist: typeof replicas[number]) => {
+            const parsed = vscode.Uri.parse(scmPersist.baseUri);
+            return parsed.scheme==='' ? vscode.Uri.file(scmPersist.baseUri) : parsed;
+        };
+        // A persisted SCM entry can outlive its directory. Treat that as no
+        // usable replica so the normal create-local-folder prompt is shown.
+        const usableReplicas = [] as typeof replicas;
+        for (const replica of replicas) {
+            try {
+                const stat = await vscode.workspace.fs.stat(replicaUri(replica));
+                if (stat.type===vscode.FileType.Directory) { usableReplicas.push(replica); }
+            } catch {
+                // Keep the persisted entry untouched; the user may recreate it.
+            }
+        }
+        replicas = usableReplicas;
         // if not exist, create new one
         if (replicas.length===0) {
             const vfs = (await (await vscode.commands.executeCommand('remoteFileSystem.prefetch', uri))) as VirtualFileSystem;
@@ -597,7 +621,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         }
 
         // open local replica
-        const replicasPath = replicas.map(scmPersist => vscode.Uri.parse(scmPersist.baseUri).fsPath);
+        const replicasPath = replicas.map(replicaUri).map(uri => uri.fsPath);
         if (replicasPath.length===0) { return; }
         const quickPickItems = replicasPath.map(path => {
             let label = path;
@@ -623,7 +647,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                             const scmKey = Object.keys(scmPersists).find(key => vscode.Uri.parse(scmPersists[key].baseUri).fsPath===item.label)!;
                             GlobalStateManager.updateServerProjectSCMPersist(this.context, serverName, projectId, scmKey);
                             // remove entry from quick pick
-                            quickPick.items = quickPick.items.filter(item => item.label!==item.label);
+                            quickPick.items = quickPick.items.filter(quickPickItem => quickPickItem.label!==item.label);
                         }
                     });
                 }
@@ -640,7 +664,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         .then(path => {
             const uri = vscode.Uri.file(path as string);
             // always open in current window
-            vscode.commands.executeCommand('vscode.openFolder', uri, false);
+            vscode.commands.executeCommand('vscode.openFolder', uri, openInNewWindow);
             vscode.commands.executeCommand('workbench.view.explorer');
         });
     }
@@ -714,7 +738,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                 this.openProjectInNewWindow(item);
             }),
             vscode.commands.registerCommand(`${ROOT_NAME}.projectManager.openProjectLocalReplica`, (item) => {
-                this.openProjectLocalReplica(item);
+                return this.openProjectLocalReplica(item);
             }),
         ];
     }

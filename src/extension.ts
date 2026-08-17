@@ -12,7 +12,7 @@ import { initOutputChannel, log } from './utils/outputChannel';
 export function activate(context: vscode.ExtensionContext) {
     // Keep extension diagnostics in a selectable channel in the Output view.
     initOutputChannel(context);
-    log('Overleaf Workshop local sync build 2026-08-17.2 activated.');
+    log('Overleaf Workshop local sync build 2026-08-17.3 activated.');
 
     // Register: [core] RemoteFileSystemProvider
     const remoteFileSystemProvider = new RemoteFileSystemProvider(context);

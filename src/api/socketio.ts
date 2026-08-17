@@ -418,10 +418,19 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async applyOtUpdate(docId:string, update:UpdateSchema) {
-        return this.emit('applyOtUpdate', docId, update)
-            .then(() => {
-                return;
-            });
+        try {
+            await this.emit('applyOtUpdate', docId, update);
+        } catch (error) {
+            let detail: string;
+            if (error instanceof Error) {
+                detail = error.message;
+            } else if (typeof error==='string') {
+                detail = error;
+            } else {
+                try { detail = JSON.stringify(error); } catch { detail = String(error); }
+            }
+            throw new Error(`Overleaf document update rejected: ${detail}`);
+        }
     }
 
     /**
