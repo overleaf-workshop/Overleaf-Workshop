@@ -122,6 +122,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private retryTimer?: NodeJS.Timeout;
     /** Whether a "Reconnecting..." notification is currently shown */
     private reconnectingNotification: boolean = false;
+    private disposed: boolean = false;
     /** Timestamp of last disconnect for debounce */
     private lastDisconnectTime: number = 0;
     /** Whether event handlers have been registered on the current socket */
@@ -142,6 +143,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     constructor(context: vscode.ExtensionContext, uri: vscode.Uri, notify: (events:vscode.FileChangeEvent[])=>void) {
         // define the dispose behavior
         super(() => {
+            this.disposed = true;
             // dispose all triggers of clientManager
             this.clientManagerItem?.triggers.forEach((trigger) => trigger.dispose());
             this.clientManagerItem = undefined;
@@ -179,6 +181,9 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async init() : Promise<ProjectEntity> {
+        if (this.disposed) {
+            throw new Error('VirtualFileSystem has been disposed.');
+        }
         if (this.root) {
             return Promise.resolve(this.root);
         }
@@ -190,6 +195,9 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     private get initializingPromise(): Promise<ProjectEntity> {
+        if (this.disposed) {
+            return Promise.reject(new Error('VirtualFileSystem has been disposed.'));
+        }
         const MAX_RETRIES = 5;
         const BASE_DELAY_MS = 1000; // 1 second base delay
 
@@ -248,6 +256,14 @@ export class VirtualFileSystem extends vscode.Disposable {
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
 
+            log('VirtualFileSystem: initializing project connection', {
+                serverName: this.serverName,
+                projectId: this.projectId,
+                attempt: this.retryConnection + 1,
+                maxAttempts: MAX_RETRIES,
+                scheme: this.socket.connectionScheme,
+            });
+
             // Only recreate the socket when the connection scheme has changed
             // (e.g., v1→v2 after connectionRejected). For transient disconnects,
             // socket.io's built-in auto-reconnect handles re-establishing the TCP
@@ -265,6 +281,11 @@ export class VirtualFileSystem extends vscode.Disposable {
 
             this.root = undefined;
             return this.socket.joinProject(this.projectId).then(async (project) => {
+                log('VirtualFileSystem: joinProject succeeded', {
+                    serverName: this.serverName,
+                    projectId: this.projectId,
+                    scheme: this.socket.connectionScheme,
+                });
                 // Reset retry counter on success
                 this.retryConnection = 0;
                 this.reconnectingNotification = false;
@@ -301,6 +322,13 @@ export class VirtualFileSystem extends vscode.Disposable {
                 vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`);
                 return project;
             }).catch((err) => {
+                error('VirtualFileSystem: project initialization failed', {
+                    serverName: this.serverName,
+                    projectId: this.projectId,
+                    attempt: this.retryConnection + 1,
+                    scheme: this.socket.connectionScheme,
+                    error: err,
+                });
                 this.retryConnection += 1;
                 return this.initializingPromise;
             });
@@ -444,9 +472,10 @@ export class VirtualFileSystem extends vscode.Disposable {
 
     private remoteWatch(): void {
         this.socket.updateEventHandlers({
-            onDisconnected: () => {
+            onDisconnected: (reason?: any) => {
+                if (this.disposed) { return; }
                 if (this.root===undefined) { return; } // bypass the first initialization
-                log("Disconnected");
+                log('VirtualFileSystem: disconnected', {serverName: this.serverName, projectId: this.projectId, reason});
                 // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
                 const now = Date.now();
                 if (now - this.lastDisconnectTime < 2000) {

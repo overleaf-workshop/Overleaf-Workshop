@@ -924,6 +924,11 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     }
 
     private async initWatch() {
+        log('LocalReplica: initializing watchers and startup sync', {
+            projectId: this.vfs.projectId,
+            projectName: this.vfs.projectName,
+            baseUri: this.baseUri.toString(),
+        });
         // write ".overleaf/settings.json" if not exist
         const settingUri = vscode.Uri.joinPath(this.baseUri, '.overleaf/settings.json');
         try {
@@ -951,6 +956,8 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         this.syncReady = (await this.initializeSync())===true;
         if (!this.syncReady) {
             log('Local replica watchers are paused until the synchronization conflict is resolved.');
+        } else {
+            log('LocalReplica: watchers are active', {projectId: this.vfs.projectId, baseUri: this.baseUri.toString()});
         }
 
         const syncStateDisposable = new vscode.Disposable(() => {

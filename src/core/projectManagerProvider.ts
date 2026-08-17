@@ -4,6 +4,7 @@ import { ProjectTagsResponseSchema } from '../api/base';
 import { GlobalStateManager } from '../utils/globalStateManager';
 import { VirtualFileSystem, parseUri } from './remoteFileSystemProvider';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import { log, notifyError } from '../utils/outputChannel';
 
 class DataItem extends vscode.TreeItem {
     constructor(
@@ -569,6 +570,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
     }
 
     async openProjectLocalReplica(project: ProjectItem) {
+        log('ProjectManager: Open Project Locally started', {projectId: project.pid, projectName: project.label, uri: project.uri});
         let openInNewWindow = false;
         // A remote Overleaf folder cannot share the same workspace with a local
         // replica. Offer a new window instead of silently returning before the
@@ -609,17 +611,21 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         if (replicas.length===0) {
             const vfs = (await (await vscode.commands.executeCommand('remoteFileSystem.prefetch', uri))) as VirtualFileSystem;
             await vfs.init();
+            log('ProjectManager: remote project initialized for local replica creation', {projectId, projectName: project.label});
             const answer = await vscode.window.showWarningMessage( vscode.l10n.t('No local replica found, create one for project "{label}" ?', {label:project.label}), "Yes", "No");
             if (answer === "Yes") {
                 await (await vscode.commands.executeCommand(`${ROOT_NAME}.projectSCM.newSCM`, LocalReplicaSCMProvider));
                 // fetch local replica scm again
                 scmPersists = GlobalStateManager.getServerProjectSCMPersists(this.context, serverName, projectId);
                 replicas = Object.values(scmPersists).filter(scmPersist => scmPersist.label===LocalReplicaSCMProvider.label);
+                if (replicas.length===0) {
+                    notifyError('Local replica creation did not produce a usable SCM record. See the Overleaf Workshop output for details.', undefined, 'local-replica-create-empty');
+                    return;
+                }
             } else {
-                vfs.dispose();
+                await vscode.commands.executeCommand('remoteFileSystem.reset', uri);
                 return;
             }
-            vfs.dispose();
         }
 
         // open local replica
@@ -740,7 +746,9 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                 this.openProjectInNewWindow(item);
             }),
             vscode.commands.registerCommand(`${ROOT_NAME}.projectManager.openProjectLocalReplica`, (item) => {
-                return this.openProjectLocalReplica(item);
+                return this.openProjectLocalReplica(item).catch(error => {
+                    notifyError('Open Project Locally failed. See the Overleaf Workshop output for details.', error, 'open-project-locally-failed');
+                });
             }),
         ];
     }

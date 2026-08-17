@@ -171,6 +171,10 @@ export class SocketIOAPI {
         return this._socketInitScheme !== this.scheme || !this.socket;
     }
 
+    get connectionScheme(): ConnectionScheme {
+        return this.scheme;
+    }
+
     /** Clean up any accumulated EventBus listeners */
     private _cleanupEventBusListeners() {
         for (const cleanup of this._eventBusCleanups) {
@@ -181,16 +185,28 @@ export class SocketIOAPI {
 
     private initInternalHandlers() {
         this.socket.on('connect', () => {
-            log('SocketIOAPI: connected');
+            log('SocketIOAPI: connected', {scheme: this.scheme, projectId: this.projectId});
         });
-        this.socket.on('connect_failed', () => {
-            log('SocketIOAPI: connect_failed');
+        this.socket.on('connect_failed', (connectionError:any) => {
+            log('SocketIOAPI: connect_failed', {scheme: this.scheme, projectId: this.projectId, error: connectionError});
+        });
+        this.socket.on('disconnect', (reason:any) => {
+            log('SocketIOAPI: disconnect event', {scheme: this.scheme, projectId: this.projectId, reason});
+        });
+        this.socket.on('reconnecting', (delay:any, attempt:any) => {
+            log('SocketIOAPI: reconnecting', {scheme: this.scheme, projectId: this.projectId, delay, attempt});
+        });
+        this.socket.on('reconnect', (transport:any, attempts:any) => {
+            log('SocketIOAPI: reconnected', {scheme: this.scheme, projectId: this.projectId, transport, attempts});
+        });
+        this.socket.on('reconnect_failed', (error:any) => {
+            log('SocketIOAPI: reconnect_failed', {scheme: this.scheme, projectId: this.projectId, error});
         });
         this.socket.on('forceDisconnect', (message:string, delay=10) => {
-            log('SocketIOAPI: forceDisconnect', message);
+            log('SocketIOAPI: forceDisconnect', {message, delay, projectId: this.projectId});
         });
         this.socket.on('connectionRejected', (err:any) => {
-            log('SocketIOAPI: connectionRejected.', err?.message || err);
+            log('SocketIOAPI: connectionRejected', {scheme: this.scheme, projectId: this.projectId, error: err});
             // If v2 also gets rejected, fall back to v1 rather than staying stuck
             if (this.scheme === 'v2') {
                 log('SocketIOAPI: v2 rejected, falling back to v1');

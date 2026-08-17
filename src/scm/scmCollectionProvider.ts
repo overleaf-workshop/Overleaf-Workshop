@@ -8,6 +8,7 @@ import { HistoryViewProvider } from './historyViewProvider';
 import { GlobalStateManager } from '../utils/globalStateManager';
 import { EventBus } from '../utils/eventBus';
 import { ROOT_NAME } from '../consts';
+import { error as logError, log, notifyError } from '../utils/outputChannel';
 
 const supportedSCMs = [
     LocalReplicaSCMProvider,
@@ -133,6 +134,13 @@ export class SCMCollectionProvider extends vscode.Disposable {
     }
 
     private async createSCM(scmProto: SupportedSCM, baseUri: vscode.Uri, newSCM=false, enabled=true) {
+        log('SCMCollection: creating SCM', {
+            label: scmProto.label,
+            baseUri: baseUri.toString(),
+            projectId: this.vfs.projectId,
+            newSCM,
+            enabled,
+        });
         const scm = new scmProto(this.vfs, baseUri);
         // insert into global state
         if (newSCM) {
@@ -148,10 +156,18 @@ export class SCMCollectionProvider extends vscode.Disposable {
             const triggers = enabled ? await scm.triggers : [];
             this.scms.push({scm,enabled,triggers});
             this.updateStatus();
+            log('SCMCollection: SCM created', {label: scmProto.label, baseUri: baseUri.toString(), triggerCount: triggers.length});
             return scm;
         } catch (error) {
-            // permanently remove failed scm
-            // this.vfs.setProjectSCMPersist(scm.scmKey, undefined);
+            if (newSCM) {
+                this.vfs.setProjectSCMPersist(scm.scmKey, undefined);
+            }
+            logError('SCMCollection: SCM creation failed', {
+                label: scmProto.label,
+                baseUri: baseUri.toString(),
+                projectId: this.vfs.projectId,
+                error,
+            });
             vscode.window.showErrorMessage( vscode.l10n.t('"{scm}" creation failed.', {scm:scmProto.label}) );
             return undefined;
         }
@@ -188,7 +204,10 @@ export class SCMCollectionProvider extends vscode.Disposable {
                 }
             });
         })
-        .then((uri) => scmProto.validateBaseUri(uri as string || '', this.vfs.projectName))
+        .then((uri) => {
+            log('SCMCollection: validating new SCM path', {label: scmProto.label, uri});
+            return scmProto.validateBaseUri(uri as string || '', this.vfs.projectName);
+        })
         .then(async (baseUri) => {
             if (baseUri) {
                 const scm = await this.createSCM(scmProto, baseUri, true);
@@ -198,6 +217,9 @@ export class SCMCollectionProvider extends vscode.Disposable {
                     vscode.window.showErrorMessage( vscode.l10n.t('"{scm}" creation failed.', {scm:scmProto.label}) );
                 }
             }
+        })
+        .catch(error => {
+            notifyError(`Could not create ${scmProto.label}. See the Overleaf Workshop output for details.`, error, 'scm-create-failed');
         });
     }
 

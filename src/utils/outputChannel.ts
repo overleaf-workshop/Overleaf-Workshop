@@ -14,7 +14,17 @@ function formatArgument(argument: unknown): string {
         return argument;
     }
     try {
-        return JSON.stringify(argument);
+        const seen = new WeakSet<object>();
+        return JSON.stringify(argument, (_key, value) => {
+            if (value instanceof Error) {
+                return Object.fromEntries(Object.getOwnPropertyNames(value).map(key => [key, (value as any)[key]]));
+            }
+            if (typeof value==='object' && value!==null) {
+                if (seen.has(value)) { return '[Circular]'; }
+                seen.add(value);
+            }
+            return value;
+        });
     } catch {
         return String(argument);
     }
