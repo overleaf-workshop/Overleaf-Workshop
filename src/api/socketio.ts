@@ -432,6 +432,14 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async updatePosition(doc_id:string, row:number, column:number) {
+        // Fire-and-forget, like the official frontend: it passes no acknowledgement
+        // callback here. Asking for an ack turns every cursor move into a promise that
+        // can only fail: the caller in ClientManager does not `catch` it, so a slow or
+        // missing ack produces a 5s timeout *and* an unhandled rejection.
+        if (this.scheme!=='Alt') {
+            this.socket.emit('clientTracking.updatePosition', {row, column, doc_id});
+            return;
+        }
         return this.emit('clientTracking.updatePosition', {row, column, doc_id})
             .then(() => {
                 return;
