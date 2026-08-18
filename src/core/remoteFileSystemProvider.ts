@@ -879,7 +879,12 @@ export class VirtualFileSystem extends vscode.Disposable {
                 })(),
             };
             this.isDirty = (update.op && update.op.length) ? true : false;
-            await this.socket.applyOtUpdate(doc._id, update);
+            // Skip the round-trip when the diff produced no operation (e.g. saving an
+            // unchanged document): the server has nothing to apply, answers with an error
+            // object and then force-disconnects the client 100ms later.
+            if (this.isDirty) {
+                await this.socket.applyOtUpdate(doc._id, update);
+            }
             doc.localCache = mergeRes;
             doc.remoteCache = mergeRes;
             setTimeout(() => {
