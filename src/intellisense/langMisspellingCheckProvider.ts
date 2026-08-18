@@ -227,7 +227,7 @@ export class MisspellingCheckProvider extends IntellisenseProvider implements vs
                     const uri = e.document.uri;
                     for (const event of e.contentChanges) {
                         // extract changed text
-                        const startLine = Math.min(0, event.range.start.line-1);
+                        const startLine = Math.max(0, event.range.start.line-1);
                         const [endLine, maxLength] = (() => {
                             try {
                                 const _line = event.range.end.line;
