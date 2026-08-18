@@ -8,6 +8,19 @@ function decodePackedUtf8(text: string): string {
     return Buffer.from(text, 'latin1').toString('utf-8');
 }
 
+/** Render an arbitrary socket.io error payload as readable text */
+function stringifyError(err:any): string {
+    if (err===null || err===undefined) { return String(err); }
+    if (typeof err === 'string') { return err; }
+    const parts = [err.name, err.code, err.message].filter(x => x!==undefined && x!==null);
+    try {
+        const json = JSON.stringify(err);
+        return parts.length && json==='{}' ? parts.join(': ') : json;
+    } catch {
+        return parts.length ? parts.join(': ') : String(err);
+    }
+}
+
 export interface UpdateUserSchema {
     id: string,
     user_id: string,
@@ -135,14 +148,29 @@ export class SocketIOAPI {
         }
         // create emit
         (this.socket.emit)[require('util').promisify.custom] = (event:string, ...args:any[]) => {
+            // The socket this call is bound to. `init()` replaces `this.socket` when the
+            // handshake scheme changes; anything emitted on the old socket can never be
+            // acknowledged, so its timeout is expected and must not be reported as a failure.
+            const socketAtEmit = this.socket;
+            let timer:any = undefined;
             const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
+                timer = setTimeout(() => {
+                    if (this.socket===socketAtEmit) {
+                        console.error(`SocketIOAPI: '${event}' timed out after 5s`);
+                    }
                     reject('timeout');
                 }, 5000);
             });
             const waitPromise = new Promise((resolve, reject) => {
-                this.socket.emit(event, ...args, (err:any, ...data:any[]) => {
+                socketAtEmit.emit(event, ...args, (err:any, ...data:any[]) => {
+                    // The answer arrived: cancel the timeout. Without this a timer is left
+                    // pending for 5s after *every* successful call, and it still runs its
+                    // callback on an already-settled race.
+                    if (timer!==undefined) { clearTimeout(timer); }
                     if (err) {
+                        // Without this, a server-side error object reaches the user as the
+                        // useless `Unable to write file ... ([object Object])`.
+                        console.error(`SocketIOAPI: '${event}' rejected:`, stringifyError(err));
                         reject(err);
                     } else {
                         resolve(data);
