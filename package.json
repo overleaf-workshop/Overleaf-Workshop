@@ -797,7 +797,7 @@
     "minimatch": "^9.0.9",
     "prettier": "^3.1.1",
     "socket.io-client": "github:overleaf/socket.io-client#0.9.17-overleaf-5",
-    "undici": "^8.7.0",
+    "undici": "^8.9.0",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
