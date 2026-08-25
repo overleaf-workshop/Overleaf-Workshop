@@ -85,6 +85,12 @@ export class SocketIOAPI {
     private emit: any;
     /** Track the scheme used when the socket was last initialized */
     private _socketInitScheme?: ConnectionScheme;
+    /** Rejection message latched from the current socket, if the server rejected the handshake */
+    private _connectionRejected?: string;
+    /** Schemes already rejected by the server, to avoid ping-pong between v1 and v2 */
+    private _rejectedSchemes: Set<ConnectionScheme> = new Set();
+    /** Pending `joinProject` calls, to be failed as soon as a rejection arrives */
+    private _rejectionWaiters: Array<(reason:string)=>void> = [];
 
     constructor(private url:string,
                 private readonly api:BaseAPI,
@@ -97,6 +103,10 @@ export class SocketIOAPI {
     init() {
         // Clean up old EventBus listeners before creating new socket
         this._cleanupEventBusListeners();
+
+        // A brand-new socket starts without any latched handshake rejection
+        this._connectionRejected = undefined;
+        this._rejectionWaiters = [];
 
         // CRITICAL: Properly disconnect old socket before creating a new one.
         // Without this, the old TCP connection is abandoned but still alive. When the
@@ -160,9 +170,9 @@ export class SocketIOAPI {
         this._socketInitScheme = this.scheme;
     }
 
-    /** Returns true if the socket needs re-initialization (scheme changed, or socket was never init'd) */
+    /** Returns true if the socket needs re-initialization (scheme changed, socket rejected, or never init'd) */
     get needsReinit(): boolean {
-        return this._socketInitScheme !== this.scheme || !this.socket;
+        return this._socketInitScheme !== this.scheme || !this.socket || this._connectionRejected!==undefined;
     }
 
     /** Clean up any accumulated EventBus listeners */
@@ -171,6 +181,23 @@ export class SocketIOAPI {
             try { cleanup(); } catch {}
         }
         this._eventBusCleanups = [];
+    }
+
+    /** Best-effort disabling of socket.io auto-reconnect (0.9.x namespace, or >=1.x manager) */
+    private stopAutoReconnect() {
+        try {
+            // socket.io-client 0.9.x: `this.socket` is a SocketNamespace wrapping the real Socket
+            const options = this.socket?.socket?.options;
+            if (options) {
+                options.reconnect = false;
+            }
+            // socket.io-client >= 1.x
+            if (this.socket?.io && typeof this.socket.io.reconnect === 'function') {
+                this.socket.io.reconnect(false);
+            }
+        } catch {
+            // best-effort only
+        }
     }
 
     private initInternalHandlers() {
@@ -184,18 +211,34 @@ export class SocketIOAPI {
             console.log('SocketIOAPI: forceDisconnect', message);
         });
         this.socket.on('connectionRejected', (err:any) => {
-            console.log('SocketIOAPI: connectionRejected.', err?.message || err);
-            // If v2 also gets rejected, fall back to v1 rather than staying stuck
-            if (this.scheme === 'v2') {
+            const message = err?.message || String(err);
+            console.log('SocketIOAPI: connectionRejected.', message);
+            // Latch the rejection. The socket connects as soon as the VirtualFileSystem is
+            // constructed, so the rejection usually arrives *before* `joinProject` is ever
+            // called: a listener registered inside `joinProject` misses it, the scheme never
+            // switches, and every later request only fails with a 5s timeout
+            // (e.g. "Unable to write file ... (timeout)").
+            const rejectedScheme = this._socketInitScheme ?? this.scheme;
+            this._rejectedSchemes.add(rejectedScheme);
+            this._connectionRejected = message;
+            // Switch the handshake scheme for the next connection attempt: overleaf.com
+            // requires the `?projectId=...` query flag on the handshake (v2), while older
+            // self-hosted instances only accept the plain handshake (v1).
+            if (rejectedScheme==='v1' && !this._rejectedSchemes.has('v2')) {
+                console.log('SocketIOAPI: v1 rejected, retrying with v2 (projectId handshake)');
+                this.scheme = 'v2';
+            } else if (rejectedScheme==='v2' && !this._rejectedSchemes.has('v1')) {
                 console.log('SocketIOAPI: v2 rejected, falling back to v1');
                 this.scheme = 'v1';
             }
             // Disable auto-reconnect on this socket: the server explicitly rejected
             // our connection parameters. Reconnecting would just get rejected again,
             // creating unnecessary TCP connection churn (and RST packets).
-            if (this.socket.io && typeof this.socket.io.reconnect === 'function') {
-                this.socket.io.reconnect(false);
-            }
+            this.stopAutoReconnect();
+            // Fail any in-flight `joinProject` immediately, instead of waiting for its timeout.
+            const waiters = this._rejectionWaiters;
+            this._rejectionWaiters = [];
+            waiters.forEach((reject) => reject(message));
         });
         this.socket.on('error', (err:any) => {
             // Log error instead of throwing to avoid crashing the extension
@@ -346,11 +389,25 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async joinProject(project_id:string): Promise<ProjectEntity> {
+        // The server may have rejected the handshake before this call was made:
+        // fail immediately, so the caller re-initializes with the updated scheme.
+        if (this._connectionRejected!==undefined) {
+            return Promise.reject(this._connectionRejected);
+        }
+
         const timeoutPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
             setTimeout(() => {
                 reject('timeout');
             }, 5000);
         });
+        // Rejected by the `connectionRejected` handler, which also updates the scheme
+        const rejectPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
+            this._rejectionWaiters.push(reject);
+        });
+        const onJoined = (project:ProjectEntity) => {
+            this._rejectedSchemes.clear();
+            return project;
+        };
 
         switch(this.scheme) {
             case 'Alt':
@@ -361,17 +418,9 @@ export class SocketIOAPI {
                     this.record = Promise.resolve(project);
                     return project;
                 });
-                const rejectPromise = new Promise((_, reject) => {
-                    this.socket.on('connectionRejected', (err:any) => {
-                        // Only fall back to v2 if we haven't already tried it;
-                        // otherwise let the outer retry logic handle backoff
-                        this.scheme = 'v2';
-                        reject(err.message);
-                    });
-                });
-                return Promise.race([joinPromise, rejectPromise, timeoutPromise]);
+                return Promise.race([joinPromise, rejectPromise, timeoutPromise]).then(onJoined);
             case 'v2':
-                return Promise.race([this.record!, timeoutPromise]);
+                return Promise.race([this.record!, rejectPromise, timeoutPromise]).then(onJoined);
         }
     }
 
