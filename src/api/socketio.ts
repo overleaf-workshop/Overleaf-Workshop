@@ -75,7 +75,7 @@ export interface EventsHandler {
 type ConnectionScheme = 'Alt' | 'v1' | 'v2';
 
 export class SocketIOAPI {
-    private scheme: ConnectionScheme = 'v1';
+    private scheme: ConnectionScheme = 'v2';
     private record?: Promise<ProjectEntity>;
     private _handlers: Array<EventsHandler> = [];
     /** Track EventBus listeners for cleanup to prevent MaxListenersExceededWarning */
@@ -165,6 +165,10 @@ export class SocketIOAPI {
         return this._socketInitScheme !== this.scheme || !this.socket;
     }
 
+    get isConnected(): boolean {
+        return Boolean(this.socket?.socket?.connected);
+    }
+
     /** Clean up any accumulated EventBus listeners */
     private _cleanupEventBusListeners() {
         for (const cleanup of this._eventBusCleanups) {
@@ -227,7 +231,7 @@ export class SocketIOAPI {
     }
 
     toggleAlternativeConnectionScheme(url: string, updatedRecord?: ProjectEntity) {
-        this.scheme = this.scheme==='Alt' ? 'v1' : 'Alt';
+        this.scheme = this.scheme==='Alt' ? 'v2' : 'Alt';
         if (updatedRecord) {
             this.url = url;
             this.record = Promise.resolve(updatedRecord);
