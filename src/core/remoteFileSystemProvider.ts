@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
-import * as DiffMatchPatch from 'diff-match-patch';
 import { BaseAPI, MemberEntity, ProjectSettingsSchema } from '../api/base';
 import { SocketIOAPI, UpdateSchema } from '../api/socketio';
 import { OUTPUT_FOLDER_NAME, ROOT_NAME } from '../consts';
@@ -9,6 +8,7 @@ import { ClientManager } from '../collaboration/clientManager';
 import { EventBus } from '../utils/eventBus';
 import { SCMCollectionProvider } from '../scm/scmCollectionProvider';
 import { ExtendedBaseAPI, ProjectLinkedFileProvider, UrlLinkedFileProvider } from '../api/extendedBase';
+import { createOtUpdate, mergeLocalChanges } from './otUpdate';
 
 const __OUTPUTS_ID = `${ROOT_NAME}-outputs`;
 
@@ -124,6 +124,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private lastDisconnectTime: number = 0;
     /** Whether event handlers have been registered on the current socket */
     private handlersRegistered: boolean = false;
+    private writeQueue: Promise<void> = Promise.resolve();
     private outputBuildId?: string;
     private compileGroup?: string;
     private clsiServerId?: string;
@@ -544,6 +545,9 @@ export class VirtualFileSystem extends vscode.Disposable {
                 } else {
                     doc.remoteCache = undefined;
                     doc.localCache = undefined;
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri: this.pathToUri(res.path)}
+                    ]);
                 }
             },
             onSpellCheckLanguageUpdated: (language:string) => {
@@ -819,6 +823,95 @@ export class VirtualFileSystem extends vscode.Disposable {
         ]);
     }
 
+    private async refreshDocument(uri: vscode.Uri): Promise<DocumentEntity> {
+        const {fileType, fileEntity} = await this._resolveUri(uri);
+        if (fileType!=='doc' || !fileEntity) {
+            throw vscode.FileSystemError.FileNotFound(uri);
+        }
+        const doc = fileEntity as DocumentEntity;
+        const snapshot = await this.socket.joinDoc(doc._id);
+        const remoteContent = snapshot.docLines.join('\n');
+        doc.version = snapshot.version;
+        doc.remoteCache = remoteContent;
+        doc.localCache = remoteContent;
+        return doc;
+    }
+
+    private async reconnectProject(): Promise<void> {
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = undefined;
+        }
+        this.lastDisconnectTime = 0;
+        this.socket.init();
+        await this.socket.joinProject(this.projectId);
+        this.retryConnection = 0;
+    }
+
+    private async writeDocument(uri: vscode.Uri, content: Uint8Array): Promise<void> {
+        const requestedContent = new TextDecoder().decode(content);
+        let baseContent: string | undefined;
+        let lastError: unknown;
+
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                if (!this.socket.isConnected) {
+                    await this.reconnectProject();
+                }
+                let {fileType, fileEntity} = await this._resolveUri(uri);
+                if (fileType!=='doc' || !fileEntity) {
+                    throw vscode.FileSystemError.FileNotFound(uri);
+                }
+                let doc = fileEntity as DocumentEntity;
+                if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
+                    doc = await this.refreshDocument(uri);
+                }
+
+                if (baseContent===undefined) {
+                    baseContent = doc.localCache!;
+                }
+                const mergedContent = mergeLocalChanges(baseContent, doc.remoteCache!, requestedContent);
+                const update = createOtUpdate(doc._id, doc.version!, doc.remoteCache!, mergedContent);
+                if (!update.op?.length) {
+                    doc.localCache = mergedContent;
+                    doc.remoteCache = mergedContent;
+                    return;
+                }
+
+                try {
+                    await this.socket.applyOtUpdate(doc._id, update);
+                } catch (error) {
+                    lastError = error;
+                    if (!this.socket.isConnected) {
+                        throw error;
+                    }
+                }
+
+                doc = await this.refreshDocument(uri);
+                if (doc.remoteCache===mergedContent) {
+                    this.isDirty = true;
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri}
+                    ]);
+                    return;
+                }
+                lastError = new Error('The server content did not match the saved document.');
+            } catch (error) {
+                lastError = error;
+            }
+
+            if (attempt===0) {
+                try {
+                    await this.reconnectProject();
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+        }
+
+        throw vscode.FileSystemError.Unavailable(`Overleaf did not confirm the save: ${String(lastError)}`);
+    }
+
     async writeFile(uri: vscode.Uri, content:Uint8Array, create:boolean, overwrite:boolean) {
         const {fileType, fileEntity} = await this._resolveUri(uri);
 
@@ -834,60 +927,10 @@ export class VirtualFileSystem extends vscode.Disposable {
 
         // if exists and is doc --> update
         if (fileType && fileType==='doc' && fileEntity) {
-            const doc = fileEntity as DocumentEntity;
-            const _content = new TextDecoder().decode(content);
-            if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
-                return;
-            }
-            const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(doc.localCache,  doc.remoteCache);
-
-            const mergeResArray = dmp.patch_apply(patches, _content);
-            const mergeRes = mergeResArray[0] as string;
-            const update = {
-                doc: doc._id,
-                lastV: doc.lastVersion,
-                v: doc.version,
-                // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
-                hash: (()=>{
-                    if (!doc.mtime || Date.now()-doc.mtime>5000) {
-                        doc.mtime = Date.now();
-                        return require('crypto').createHash('sha1').update(
-                            "blob " + mergeRes.length + "\x00" + mergeRes
-                        ).digest('hex');
-                    }
-                })() as string,
-                op: (()=>{
-                    const remoteCacheAscii = Buffer.from(doc.remoteCache, 'utf-8').toString('utf-8');
-                    const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
-                    let currentPos = 0;
-                    return dmp.diff_main(remoteCacheAscii, mergeResAscii)
-                                .map((part) => {
-                                    // part[0] === -1: delete, 0: equal, 1: insert; part[1]: compared content
-                                    const incCount = part[0] === -1 ? 0 : part[1].length;
-                                    currentPos += incCount;
-                                    // add op when content not equal
-                                    if (part[0] !== 0) {
-                                        return {
-                                            p: currentPos - incCount,
-                                            i: part[0] ===  1 ?  part[1] : undefined,
-                                            d: part[0] === -1 ?  part[1] : undefined,
-                                        };
-                                    }
-                                })
-                                .filter(x => x) as any;
-                })(),
-            };
-            this.isDirty = (update.op && update.op.length) ? true : false;
-            await this.socket.applyOtUpdate(doc._id, update);
-            doc.localCache = mergeRes;
-            doc.remoteCache = mergeRes;
-            setTimeout(() => {
-                this.notify([
-                    {type: vscode.FileChangeType.Changed, uri: uri}
-                ]);
-            }, 10);
-            doc.lastVersion = doc.version;                
+            const write = this.writeQueue.catch(() => undefined)
+                .then(() => this.writeDocument(uri, content));
+            this.writeQueue = write.then(() => undefined, () => undefined);
+            return write;
         }
     }
 
