@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as DiffMatchPatch from 'diff-match-patch';
+import * as path from 'path';
 import { minimatch } from 'minimatch';
 import { BaseSCM, CommitItem, SettingItem } from ".";
 import { VirtualFileSystem, parseUri } from '../core/remoteFileSystemProvider';
@@ -345,9 +346,24 @@ export class LocalReplicaSCMProvider extends BaseSCM {
      */
     private onDocumentSaved(doc: vscode.TextDocument) {
         const docUri = doc.uri;
-        // Only sync files within our baseUri (ensure path separator boundary)
-        const basePath = this.baseUri.path.endsWith('/') ? this.baseUri.path : this.baseUri.path + '/';
-        if (!docUri.path.startsWith(basePath)) { return; }
+
+        // Check the URI scheme before using fsPath for filesystem path comparison.
+        if (docUri.scheme!=='file' || this.baseUri.scheme!=='file') { return; }
+
+        const basePath = path.resolve(this.baseUri.fsPath);
+        const docPath = path.resolve(docUri.fsPath);
+        const relativePath = path.relative(basePath, docPath);
+
+        // Ignore paths outside the Local Replica directory:
+        if (
+            relativePath==='' // an empty path means the document path is the replica root itself;
+            || relativePath==='..' // ".." means the document path is the parent directory;
+            || relativePath.startsWith(`..${path.sep}`) // "../..." means the document is outside the replica directory;
+            || path.isAbsolute(relativePath) // an absolute result may occur on Windows when the paths are on different drives.
+        ) {
+            return;
+        }
+
         this.syncToVFS(docUri, 'update');
     }
 
