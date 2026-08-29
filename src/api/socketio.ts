@@ -8,6 +8,21 @@ function decodePackedUtf8(text: string): string {
     return Buffer.from(text, 'latin1').toString('utf-8');
 }
 
+/** How long to wait for a server acknowledgement before giving up on an emit. */
+const EMIT_TIMEOUT_MS = 15000;
+
+/** Render a socket.io error payload as something readable instead of `[object Object]`. */
+function stringifyError(err: any): string {
+    if (err === null || err === undefined) { return 'unknown error'; }
+    if (typeof err === 'string') { return err; }
+    if (err.message) { return err.message; }
+    try {
+        return JSON.stringify(err);
+    } catch {
+        return String(err);
+    }
+}
+
 export interface UpdateUserSchema {
     id: string,
     user_id: string,
@@ -135,15 +150,22 @@ export class SocketIOAPI {
         }
         // create emit
         (this.socket.emit)[require('util').promisify.custom] = (event:string, ...args:any[]) => {
+            // Bind the call to the socket it is emitted on: init() may swap this.socket
+            // out from under an in-flight call, and that call can never be acknowledged.
+            const socket = this.socket;
+            let timer: NodeJS.Timeout;
             const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
-                    reject('timeout');
-                }, 5000);
+                timer = setTimeout(() => {
+                    reject(new Error(`'${event}' timed out after ${EMIT_TIMEOUT_MS}ms`));
+                }, EMIT_TIMEOUT_MS);
             });
             const waitPromise = new Promise((resolve, reject) => {
-                this.socket.emit(event, ...args, (err:any, ...data:any[]) => {
+                socket.emit(event, ...args, (err:any, ...data:any[]) => {
+                    // Clear the timer as soon as the ack lands, otherwise every single
+                    // emit leaks a live timer for the whole timeout window.
+                    clearTimeout(timer);
                     if (err) {
-                        reject(err);
+                        reject(err instanceof Error ? err : new Error(`'${event}' rejected: ${stringifyError(err)}`));
                     } else {
                         resolve(data);
                     }
@@ -200,6 +222,13 @@ export class SocketIOAPI {
         this.socket.on('error', (err:any) => {
             // Log error instead of throwing to avoid crashing the extension
             console.error('SocketIOAPI: socket error', err?.message || err);
+        });
+        // The server reports a rejected document update on its own channel and sends no
+        // ack for the emit, so without this the real reason (stale version, hash
+        // mismatch, lost session) is invisible and surfaces only as a generic timeout.
+        this.socket.on('otUpdateError', (err:any, update?:any) => {
+            console.error('SocketIOAPI: otUpdateError', stringifyError(err),
+                          update!==undefined ? stringifyError(update) : '');
         });
 
         if (this.scheme==='v2') {
@@ -408,6 +437,16 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async applyOtUpdate(docId:string, update:UpdateSchema) {
+        // An update that carries no ops is a no-op — there is nothing for the
+        // server to apply. The alternative connection scheme (SocketIOAlt)
+        // already short-circuits these; the realtime socket must too. Recent
+        // overleaf.com real-time validation rejects an empty-op update outright
+        // (`'applyOtUpdate' rejected: Invalid input`) and then disconnects the
+        // client, after which every following write fails until the window is
+        // reloaded. The genuine Overleaf client never emits an empty op either.
+        if (!update.op?.length) {
+            return;
+        }
         return this.emit('applyOtUpdate', docId, update)
             .then(() => {
                 return;
