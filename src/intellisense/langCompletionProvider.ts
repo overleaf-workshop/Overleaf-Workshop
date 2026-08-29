@@ -4,6 +4,7 @@ import { SnippetItemSchema } from '../api/base';
 import { fuzzyFilter, IntellisenseProvider } from '.';
 import { RemoteFileSystemProvider, VirtualFileSystem, parseUri } from '../core/remoteFileSystemProvider';
 import { TexDocumentSymbolProvider } from './texDocumentSymbolProvider';
+import { CitationMetadata, parseBibContent } from './citationMetadata';
 
 type SnippetItemMap = {[K:string]: SnippetItemSchema};
 type FilePathCompletionType = 'text' | 'image' | 'bib';
@@ -411,20 +412,43 @@ export class ReferenceCompletionProvider extends IntellisenseProvider implements
     }
 
     private async getReferenceCompletionItemsFromBib(vfs: VirtualFileSystem): Promise<vscode.CompletionItem[]> {
-        const bibRegex = /@(?:(?!STRING\b)[^{])+\{\s*([^},]+)/gm;
         const items = new Array<vscode.CompletionItem>();
         for (const path of this.texSymbolProvider.currentBibPathArray) {
             try{
                 const rawContent = await vfs.openFile( vfs.pathToUri(path) );
                 const content = new TextDecoder().decode(rawContent);
-                let match: RegExpExecArray | null;
-                while (match = bibRegex.exec(content)) {
-                    const item = new vscode.CompletionItem(match[1], vscode.CompletionItemKind.Reference);
-                    items.push(item);
+                const entries = parseBibContent(content);
+                for (const entry of entries) {
+                    items.push(this.createCitationCompletionItem(entry));
                 }
             } catch{}
         };
         return items;
+    }
+
+    private createCitationCompletionItem(entry: CitationMetadata): vscode.CompletionItem {
+        const escapeMarkdown = (value: string) => value.replace(/[\\`*_{}\[\]()#+\-.!|>]/g, '\\$&');
+        const item = new vscode.CompletionItem(entry.key, vscode.CompletionItemKind.Reference);
+        const subtitle = [entry.author, entry.year].filter(Boolean).join(' - ');
+        if (subtitle) {
+            item.detail = subtitle;
+        }
+
+        const markdown = new vscode.MarkdownString();
+        const title = entry.title ?? entry.key;
+        markdown.appendMarkdown(`**${escapeMarkdown(title)}**  \n`);
+        if (entry.author) {
+            markdown.appendMarkdown(`**Authors**: ${escapeMarkdown(entry.author)}  \n`);
+        }
+        if (entry.year) {
+            markdown.appendMarkdown(`**Year**: ${escapeMarkdown(entry.year)}  \n`);
+        }
+        if (entry.journal ?? entry.booktitle) {
+            markdown.appendMarkdown(`**Venue**: *${escapeMarkdown(entry.journal ?? entry.booktitle ?? '')}*  \n`);
+        }
+        markdown.appendMarkdown(`Key: \`${escapeMarkdown(entry.key)}\``);
+        item.documentation = markdown;
+        return item;
     }
 
     private async getReferenceCompletionItemsFromBbl(vfs: VirtualFileSystem): Promise<vscode.CompletionItem[]>{
