@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
-import * as DiffMatchPatch from 'diff-match-patch';
 import { EventEmitter } from 'events';
 import { BaseAPI, Identity, ProjectMessageResponseSchema, ProjectSettingsSchema } from './base';
 import { DocumentEntity, FileEntity, ProjectEntity, VirtualFileSystem } from '../core/remoteFileSystemProvider';
 import { UpdateSchema, UpdateUserSchema } from './socketio';
 import { ROOT_NAME } from '../consts';
+import { threeWayMerge, tryTrivialMerge } from '../utils/threeWayMerge';
 
 const keyHistoryRefreshInterval = `${ROOT_NAME}.invisibleMode.historyRefreshInterval`;
 const keyChatMessageRefreshInterval = `${ROOT_NAME}.invisibleMode.chatMessageRefreshInterval`;
@@ -211,13 +211,24 @@ export class SocketIOAlt {
                     if (_doc && _doc.isDirty) { await _doc.save(); }
                     // generate patch and apply locally
                     const vfsLocalVersion = this.vfsLocalVersion!;
-                    const dmp = new DiffMatchPatch();
                     const localContent = new TextDecoder().decode( await vfs.openFile(_uri) );
                     const baseRemoteContent = (await vfs.getFileDiff(pathname, vfsLocalVersion, vfsLocalVersion))?.diff[0].u;
                     const latestRemoteContent = (await vfs.getFileDiff(pathname, latestVersion, latestVersion))?.diff[0].u;
                     if (baseRemoteContent!==undefined && latestRemoteContent!==undefined) {
-                        const patch = dmp.patch_make(baseRemoteContent, latestRemoteContent);
-                        const [localContentPatched, _] = dmp.patch_apply(patch, localContent);
+                        // Perform a proper three-way merge:
+                        //   base   = baseRemoteContent (common ancestor)
+                        //   local  = localContent (current local file)
+                        //   remote = latestRemoteContent (latest server state)
+                        let localContentPatched = tryTrivialMerge(baseRemoteContent, localContent, latestRemoteContent);
+                        if (localContentPatched === undefined) {
+                            const mergeResult = threeWayMerge(baseRemoteContent, localContent, latestRemoteContent);
+                            localContentPatched = mergeResult.content;
+                            if (mergeResult.hasConflict) {
+                                vscode.window.showWarningMessage(
+                                    vscode.l10n.t('Merge conflict in "{0}". Remote changes overlap with your local edits. Conflict markers have been inserted — please review and resolve.', pathname)
+                                );
+                            }
+                        }
                         this._eventEmitter.emit('otUpdateApplied', {
                             doc: entityId,
                             v: (entity as DocumentEntity).version, //bypass update check
