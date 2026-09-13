@@ -823,7 +823,7 @@
     "download-cli": "^1.1.1",
     "eslint": "^8.41.0",
     "husky": "^8.0.3",
-    "mocha": "^10.8.2",
+    "mocha": "^12.0.1",
     "patch-package": "^8.0.1",
     "typescript": "^5.1.3"
   },
