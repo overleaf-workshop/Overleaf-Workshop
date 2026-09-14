@@ -839,55 +839,95 @@ export class VirtualFileSystem extends vscode.Disposable {
             if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
                 return;
             }
-            const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(doc.localCache,  doc.remoteCache);
+            // Build the OT update against whatever the caches currently hold, so that a
+            // retry after a resync diffs against the server's content, not stale content.
+            const buildUpdate = () => {
+                const dmp = new DiffMatchPatch();
+                const patches = dmp.patch_make(doc.localCache!,  doc.remoteCache!);
 
-            const mergeResArray = dmp.patch_apply(patches, _content);
-            const mergeRes = mergeResArray[0] as string;
-            const update = {
-                doc: doc._id,
-                lastV: doc.lastVersion,
-                v: doc.version,
-                // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
-                hash: (()=>{
-                    if (!doc.mtime || Date.now()-doc.mtime>5000) {
-                        doc.mtime = Date.now();
-                        return require('crypto').createHash('sha1').update(
-                            "blob " + mergeRes.length + "\x00" + mergeRes
-                        ).digest('hex');
-                    }
-                })() as string,
-                op: (()=>{
-                    const remoteCacheAscii = Buffer.from(doc.remoteCache, 'utf-8').toString('utf-8');
-                    const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
-                    let currentPos = 0;
-                    return dmp.diff_main(remoteCacheAscii, mergeResAscii)
-                                .map((part) => {
-                                    // part[0] === -1: delete, 0: equal, 1: insert; part[1]: compared content
-                                    const incCount = part[0] === -1 ? 0 : part[1].length;
-                                    currentPos += incCount;
-                                    // add op when content not equal
-                                    if (part[0] !== 0) {
-                                        return {
-                                            p: currentPos - incCount,
-                                            i: part[0] ===  1 ?  part[1] : undefined,
-                                            d: part[0] === -1 ?  part[1] : undefined,
-                                        };
-                                    }
-                                })
-                                .filter(x => x) as any;
-                })(),
+                const mergeResArray = dmp.patch_apply(patches, _content);
+                const mergeRes = mergeResArray[0] as string;
+                const update = {
+                    doc: doc._id,
+                    lastV: doc.lastVersion,
+                    v: doc.version!,
+                    // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
+                    hash: (()=>{
+                        if (!doc.mtime || Date.now()-doc.mtime>5000) {
+                            doc.mtime = Date.now();
+                            return require('crypto').createHash('sha1').update(
+                                "blob " + mergeRes.length + "\x00" + mergeRes
+                            ).digest('hex');
+                        }
+                    })() as string,
+                    op: (()=>{
+                        const remoteCacheAscii = Buffer.from(doc.remoteCache!, 'utf-8').toString('utf-8');
+                        const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
+                        let currentPos = 0;
+                        return dmp.diff_main(remoteCacheAscii, mergeResAscii)
+                                    .map((part) => {
+                                        // part[0] === -1: delete, 0: equal, 1: insert; part[1]: compared content
+                                        const incCount = part[0] === -1 ? 0 : part[1].length;
+                                        currentPos += incCount;
+                                        // add op when content not equal
+                                        if (part[0] !== 0) {
+                                            return {
+                                                p: currentPos - incCount,
+                                                i: part[0] ===  1 ?  part[1] : undefined,
+                                                d: part[0] === -1 ?  part[1] : undefined,
+                                            };
+                                        }
+                                    })
+                                    .filter(x => x) as any;
+                    })(),
+                };
+                return {update, mergeRes};
             };
-            this.isDirty = (update.op && update.op.length) ? true : false;
-            await this.socket.applyOtUpdate(doc._id, update);
-            doc.localCache = mergeRes;
-            doc.remoteCache = mergeRes;
-            setTimeout(() => {
-                this.notify([
-                    {type: vscode.FileChangeType.Changed, uri: uri}
-                ]);
-            }, 10);
-            doc.lastVersion = doc.version;                
+
+            let lastError: any;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                const {update, mergeRes} = buildUpdate();
+                this.isDirty = (update.op && update.op.length) ? true : false;
+                try {
+                    await this.socket.applyOtUpdate(doc._id, update);
+                    // An op submitted at version v moves the doc to v+1, but the server only
+                    // broadcasts `otUpdateApplied` to the OTHER clients in the project — the
+                    // author learns the new version from the ack alone. Without advancing it
+                    // here, every later write re-submits a stale v, the server rejects it via
+                    // `otUpdateError` (which sends no ack at all), and the write dies as a
+                    // bogus timeout until the doc is re-opened.
+                    if (update.op && update.op.length) {
+                        doc.lastVersion = doc.version;
+                        doc.version! += 1;
+                    }
+                    doc.localCache = mergeRes;
+                    doc.remoteCache = mergeRes;
+                    setTimeout(() => {
+                        this.notify([
+                            {type: vscode.FileChangeType.Changed, uri: uri}
+                        ]);
+                    }, 10);
+                    return;
+                } catch (err) {
+                    lastError = err;
+                    if (attempt > 0) { break; }
+                    // Re-join the doc to resync version and content, then rebuild the op
+                    // against what the server actually holds and try once more. This also
+                    // recovers when the real-time session was dropped underneath us.
+                    try {
+                        const rejoin = await this.socket.joinDoc(doc._id);
+                        const remote = rejoin.docLines.join('\n');
+                        doc.version = rejoin.version;
+                        doc.lastVersion = rejoin.version;
+                        doc.remoteCache = remote;
+                        doc.localCache = remote;
+                        doc.mtime = undefined;
+                    } catch {
+                        break;
+                    }
+                }
+            }
+            throw lastError;
         }
     }
 
