@@ -40,20 +40,24 @@ Notice that if you have logged in to the server, the login information will be r
 
 ![screenshot-login-to-server](assets/screenshot-login-to-server.png)
 
-There are currently two ways to login to the server: login with email and password, and login with cookies.
+There are currently three ways to login to the server: login with browser, login with email and password, and login with cookies.
 
 > [!WARNING]
 > According to the [open-source `passportLogin` design](https://github.com/overleaf/overleaf/blob/5fc2535842b2727cb1ec33ed5543ca614b4fc25b/services/web/app/src/Features/Authentication/AuthenticationController.js#L79) and observation of the login process, the email and password are sent to the server in ***plain text***, which implies that the server can ***see your password*** even if the connection is encrypted.
 > We highly suggest you aware of this risk and use a ***separate password*** for the server, or use [SSO login](https://www.overleaf.com/learn/how-to/Managing_your_Overleaf_emails_and_login_options#Logging_in_with_institutional_or_organizational_single_sign-on_(SSO)) instead.
 
-> [!NOTE]
-> We are working on the webview-based login feature (to be appeared in `v1.0.0`). Please stay tuned.
+#### Login with Browser
+This is the recommended way for SSO or captcha-protected servers such as `https://www.overleaf.com`. The extension launches a Chromium-based browser installed on your machine (Google Chrome, Microsoft Edge, Brave or Chromium) with a dedicated profile and opens the login page of the server. Sign in there as you normally would, including institutional SSO. As soon as the project list page is reached, the extension picks up the session and closes the browser window.
+
+Under the hood, the browser is controlled via the Chrome DevTools Protocol over a local pipe (no debugging port is opened), and only the cookies of the server are read. The dedicated profile lives in the extension's global storage and is independent from your daily browser profile.
+
+If no browser is detected automatically, set the path of the browser executable in the setting `overleaf-workshop.login.browserPath`. Closing the browser window, or pressing "Cancel" on the notification in VS Code, aborts the login.
 
 #### Login with Email and Password
 If you can login via email and password on the web browser, you can also login via email and password in VS Code. The exception is that Captcha is enabled on the server, then you have to [login with cookies](#login-with-cookies) instead.
 
 #### Login with Cookies
-As for the cases that Captcha is enabled on the server, or you want to login with SSO, you have to login with cookies from an already logged-in browser. The steps are as follows:
+As for the cases that no Chromium-based browser is available for the [browser login](#login-with-browser) (e.g., on a remote machine), you can login with cookies from an already logged-in browser. The steps are as follows:
 
 ![screenshot-login-with-cookies](assets/login_with_cookie.png)
 

@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ROOT_NAME } from '../consts';
 import { ProjectTagsResponseSchema } from '../api/base';
 import { GlobalStateManager } from '../utils/globalStateManager';
 import { VirtualFileSystem, parseUri } from './remoteFileSystemProvider';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import { loginWithBrowser, BrowserNotFoundError, LoginCancelledError } from '../utils/browserLogin';
 
 class DataItem extends vscode.TreeItem {
     constructor(
@@ -209,60 +211,97 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
     }
 
     loginServer(server: ServerItem) {
-        const loginMethods:Record<string, ()=>void> = {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login with Password': () => {
-                vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Email')})
-                .then(email => email ? Promise.resolve(email) : Promise.reject())
-                .then(email =>
-                    vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Password'), 'password': true})
-                    .then(password => {
-                        return password ? Promise.resolve([email,password]) : Promise.reject();
-                    })
-                )
-                .then(([email,password]) =>
-                    GlobalStateManager.loginServer(this.context, server.api, server.name, {email, password})
-                )
-                .then(success => {
-                    if (success) {
-                        this.refresh();
-                    } else {
-                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
-                    }
-                });
-            },
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login with Cookies': () => {
-                vscode.window.showInputBox({
-                    'placeHolder': vscode.l10n.t('Cookies, e.g., "sharelatex.sid=..." or "overleaf_session2=..."'),
-                    'prompt': vscode.l10n.t('README: [How to Login with Cookies](https://github.com/overleaf-workshop/overleaf-workshop#how-to-login-with-cookies)'),
-                })
-                .then(cookies => cookies ? Promise.resolve(cookies) : Promise.reject())
-                .then(cookies =>
-                    GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies})
-                )
-                .then(success => {
-                    if (success) {
-                        this.refresh();
-                    } else {
-                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
-                    }
-                });
-            },
+        const onLoginResult = (success: boolean) => {
+            if (success) {
+                this.refresh();
+            } else {
+                vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
+            }
         };
 
-        //NOTE: temporarily disable password-based login for `www.overleaf.com`
-        if (server.name==='www.overleaf.com') {
-            delete loginMethods['Login with Password'];
-        }
+        const loginMethods: (vscode.QuickPickItem & {id: string, callback: () => void})[] = [
+            {
+                id: 'browser',
+                label: vscode.l10n.t('Login with Browser'),
+                description: vscode.l10n.t('Sign in on the server\'s login page in Chrome/Edge (supports SSO and captcha)'),
+                callback: () => {
+                    const serverUrl = GlobalStateManager.getServers(this.context)
+                                        .find(item => item.server.name===server.name)?.server.url;
+                    if (serverUrl===undefined) {
+                        vscode.window.showErrorMessage( vscode.l10n.t('Login failed.') );
+                        return;
+                    }
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: vscode.l10n.t('Waiting for the login in the browser to complete...'),
+                        cancellable: true,
+                    }, (_progress, token) => loginWithBrowser(serverUrl, {
+                        executablePath: vscode.workspace.getConfiguration(ROOT_NAME).get<string>('login.browserPath') || undefined,
+                        profileDir: path.join(this.context.globalStorageUri.fsPath, 'browser-profiles', server.name),
+                        token,
+                    }))
+                    .then(cookies =>
+                        GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies})
+                        .then(onLoginResult)
+                    , error => {
+                        if (error instanceof LoginCancelledError) { return; }
+                        if (error instanceof BrowserNotFoundError) {
+                            vscode.window.showErrorMessage( vscode.l10n.t('No Chromium-based browser (Chrome, Edge, Brave) was found. Set "{setting}" to the browser executable, or use "Login with Cookies".', {setting: `${ROOT_NAME}.login.browserPath`}) );
+                        } else {
+                            vscode.window.showErrorMessage( vscode.l10n.t('Login failed: {message}', {message: error?.message ?? String(error)}) );
+                        }
+                    });
+                },
+            },
+            {
+                id: 'password',
+                label: vscode.l10n.t('Login with Password'),
+                description: vscode.l10n.t('Email and password'),
+                callback: () => {
+                    vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Email')})
+                    .then(email => email ? Promise.resolve(email) : Promise.reject())
+                    .then(email =>
+                        vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Password'), 'password': true})
+                        .then(password => {
+                            return password ? Promise.resolve([email,password]) : Promise.reject();
+                        })
+                    )
+                    .then(([email,password]) =>
+                        GlobalStateManager.loginServer(this.context, server.api, server.name, {email, password})
+                    )
+                    .then(onLoginResult);
+                },
+            },
+            {
+                id: 'cookies',
+                label: vscode.l10n.t('Login with Cookies'),
+                description: vscode.l10n.t('Paste the cookies of a logged-in browser'),
+                callback: () => {
+                    vscode.window.showInputBox({
+                        'placeHolder': vscode.l10n.t('Cookies, e.g., "sharelatex.sid=..." or "overleaf_session2=..."'),
+                        'prompt': vscode.l10n.t('README: [How to Login with Cookies](https://github.com/overleaf-workshop/overleaf-workshop#how-to-login-with-cookies)'),
+                    })
+                    .then(cookies => cookies ? Promise.resolve(cookies) : Promise.reject())
+                    .then(cookies =>
+                        GlobalStateManager.loginServer(this.context, server.api, server.name, {cookies})
+                    )
+                    .then(onLoginResult);
+                },
+            },
+        ];
 
-        vscode.window.showQuickPick(Object.keys(loginMethods), {
+        //NOTE: temporarily disable password-based login for `www.overleaf.com`
+        const availableMethods = server.name==='www.overleaf.com'
+                                ? loginMethods.filter(method => method.id!=='password')
+                                : loginMethods;
+
+        vscode.window.showQuickPick(availableMethods, {
             canPickMany:false, placeHolder:vscode.l10n.t('Select the login method below.')})
         .then(selection => {
-            if (selection===undefined) { return Promise.reject(); }
-            return Promise.resolve( (loginMethods as any)[selection] );
-        })
-        .then(method => method());
+            if (selection!==undefined) {
+                selection.callback();
+            }
+        });
     }
 
     logoutServer(server: ServerItem) {

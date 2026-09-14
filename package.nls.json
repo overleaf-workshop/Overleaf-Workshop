@@ -62,6 +62,7 @@
     "configuration.invisibleMode.chatMessageRefreshInterval.markdownDescription": "The interval (in seconds) to refresh the chat messages in invisible mode.",
     "configuration.invisibleMode.inactiveTimeout.markdownDescription": "The timeout (in seconds) to mark a online Collaborator as inactivate in invisible mode.",
     "configuration.formatWithLineBreak.enabled.markdownDescription": "Enable line breaks when formatting.",
+    "configuration.login.browserPath.markdownDescription": "Path to a Chromium-based browser executable (Chrome, Edge, Brave, Chromium) used by \"Login with Browser\". Leave empty to detect an installed browser automatically.",
 
     "views.overleaf-workshop.projectManager.name": "Hosts",
     "views.explorer.overleaf-workshop.projectHistory": "History",

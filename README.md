@@ -14,8 +14,8 @@ The full user guide is available at [GitHub Wiki](https://github.com/overleaf-wo
 ### Features
 
 > [!NOTE]
-> For SSO login or captcha enabled servers like `https://www.overleaf.com`, please use "**Login with Cookies**" method.
-> For more details, please refer to [How to Login with Cookies](#how-to-login-with-cookies).
+> "**Login with Browser**" opens the server's login page in your Chrome/Edge and picks up the session automatically once you are signed in. It works with SSO and captcha-protected servers like `https://www.overleaf.com`.
+> If no Chromium-based browser is available, please use the "**Login with Cookies**" method instead, see [How to Login with Cookies](#how-to-login-with-cookies).
 
 - Login Server, Open Projects and Edit Files
 

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- feat: login with browser via Chrome DevTools Protocol, supporting SSO and captcha (see iamhyc/overleaf-workshop#21, iamhyc/overleaf-workshop#83)
+
 ## [0.15.10] - 2026-07-11
 ### Changed
 - fix: enhance connection resilience and fix TCP RST causing spurious connection lost (fixes #309)
