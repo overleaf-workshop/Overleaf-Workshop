@@ -223,7 +223,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
             {
                 id: 'browser',
                 label: vscode.l10n.t('Login with Browser'),
-                description: vscode.l10n.t('Sign in on the server\'s login page in Chrome/Edge (supports SSO and captcha)'),
+                description: vscode.l10n.t('Sign in on the server\'s login page in Chrome/Edge/Firefox (supports SSO and captcha)'),
                 callback: () => {
                     const serverUrl = GlobalStateManager.getServers(this.context)
                                         .find(item => item.server.name===server.name)?.server.url;
@@ -246,7 +246,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                     , error => {
                         if (error instanceof LoginCancelledError) { return; }
                         if (error instanceof BrowserNotFoundError) {
-                            vscode.window.showErrorMessage( vscode.l10n.t('No Chromium-based browser (Chrome, Edge, Brave) was found. Set "{setting}" to the browser executable, or use "Login with Cookies".', {setting: `${ROOT_NAME}.login.browserPath`}) );
+                            vscode.window.showErrorMessage( vscode.l10n.t('No supported browser (Chrome, Edge, Brave, Chromium, Firefox) was found. Set "{setting}" to the browser executable, or use "Login with Cookies".', {setting: `${ROOT_NAME}.login.browserPath`}) );
                         } else {
                             vscode.window.showErrorMessage( vscode.l10n.t('Login failed: {message}', {message: error?.message ?? String(error)}) );
                         }

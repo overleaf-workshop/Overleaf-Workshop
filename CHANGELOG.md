@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
-- feat: login with browser via Chrome DevTools Protocol, supporting SSO and captcha (see iamhyc/overleaf-workshop#21, iamhyc/overleaf-workshop#83)
+- feat: login with browser (Chrome/Edge/Brave/Chromium via Chrome DevTools Protocol, Firefox via WebDriver BiDi), supporting SSO and captcha (see iamhyc/overleaf-workshop#21, iamhyc/overleaf-workshop#83)
 
 ## [0.15.10] - 2026-07-11
 ### Changed
