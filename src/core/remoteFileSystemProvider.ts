@@ -519,6 +519,16 @@ export class VirtualFileSystem extends vscode.Disposable {
                 if (res===undefined) { return; }
 
                 const doc = res.fileEntity as DocumentEntity;
+                // An update without `op` is the server's ack of our own write, sent to the
+                // author after the emit callback has already fired. writeFile() has advanced
+                // `doc.version` from that callback, so only catch up if we are still behind,
+                // and never drop the caches over it: with them gone the next save is skipped.
+                if (update.op===undefined) {
+                    if (doc.version!==undefined && update.v>=doc.version) {
+                        doc.version = update.v + 1;
+                    }
+                    return;
+                }
                 if (update.v===doc.version) {
                     doc.version += 1;
                     if (update.op && doc.remoteCache!==undefined) {
@@ -890,12 +900,13 @@ export class VirtualFileSystem extends vscode.Disposable {
                 this.isDirty = (update.op && update.op.length) ? true : false;
                 try {
                     await this.socket.applyOtUpdate(doc._id, update);
-                    // An op submitted at version v moves the doc to v+1, but the server only
-                    // broadcasts `otUpdateApplied` to the OTHER clients in the project — the
-                    // author learns the new version from the ack alone. Without advancing it
-                    // here, every later write re-submits a stale v, the server rejects it via
-                    // `otUpdateError` (which sends no ack at all), and the write dies as a
-                    // bogus timeout until the doc is re-opened.
+                    // An op submitted at version v moves the doc to v+1. The author is told so
+                    // only by an op-less `otUpdateApplied`, which arrives after this callback
+                    // and only while the client is in the doc's room — not, e.g., after a
+                    // reconnect that did not re-join the doc. Advance the version here so a
+                    // missing ack cannot leave every later write re-submitting a stale v,
+                    // rejected via `otUpdateError` (no ack) and surfacing as a bogus timeout.
+                    // `onFileChanged` then treats the late ack as a no-op.
                     if (update.op && update.op.length) {
                         doc.lastVersion = doc.version;
                         doc.version! += 1;
