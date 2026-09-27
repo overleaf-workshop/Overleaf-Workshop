@@ -61,6 +61,7 @@ export interface UpdateSchema {
     v: number, //doc version number
     lastV?: number, //last version number
     hash?: string, //(not needed if lastV is provided)
+    dupIfSource?: string[], //publicIds an earlier submission of this update may have come from
     meta?: {
         source: string, //socketio client id
         ts: number, //unix timestamp

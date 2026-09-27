@@ -34,6 +34,31 @@ export interface DocumentEntity extends FileEntity {
     lastVersion?: number,
     localCache?: string,
     remoteCache?: string,
+    /** Set while one of our own updates is being reconciled with the server (see writeFile). */
+    sync?: {
+        done: Promise<void>,
+        onAck?: (v:number) => void,
+        /** an ack that arrived before `reconcile` started listening */
+        earlyAck?: number,
+        buffered: UpdateSchema[],
+        release: () => void,
+    },
+    /** A write whose emit failed, not known to have reached the server (see submitWrite). */
+    unconfirmed?: PendingWrite,
+}
+
+interface PendingWrite {
+    update: UpdateSchema,
+    /** the content the update turns the server's copy into */
+    mergeRes: string,
+    /** the content written, i.e. what the editor holds */
+    content: string,
+    /** `localCache` before the write */
+    base: string,
+    /** `seq` of the connection current at the first attempt (see VirtualFileSystem.connections) */
+    firstConnection?: number,
+    /** already sent again after the server applied nothing (see reconcile) */
+    resubmitted?: boolean,
 }
 
 export interface FileRefEntity extends FileEntity {
@@ -113,6 +138,12 @@ export class VirtualFileSystem extends vscode.Disposable {
     private api: BaseAPI;
     private socket: SocketIOAPI;
     private publicId?: string;
+    /** this client's recent connections, numbered in the order they were accepted */
+    private connections: {publicId: string, seq: number}[] = [];
+    /** settles once a connection is accepted again, while the socket is disconnected */
+    private reconnected?: {promise: Promise<void>, resolve: () => void};
+    /** How long to wait for the server's ack of our own update before re-reading the doc. */
+    static ownUpdateAckTimeoutMs = 5000;
     private userId: string;
     private isDirty: boolean = true;
     private initializing?: Promise<ProjectEntity>;
@@ -439,6 +470,11 @@ export class VirtualFileSystem extends vscode.Disposable {
     private remoteWatch(): void {
         this.socket.updateEventHandlers({
             onDisconnected: () => {
+                if (!this.reconnected) {
+                    let resolve!: () => void;
+                    const promise = new Promise<void>((r) => { resolve = r; });
+                    this.reconnected = {promise, resolve};
+                }
                 if (this.root===undefined) { return; } // bypass the first initialization
                 console.log("Disconnected");
                 // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
@@ -467,6 +503,10 @@ export class VirtualFileSystem extends vscode.Disposable {
                     this.retryTimer = undefined;
                 }
                 this.publicId = publicId;
+                this.connections.push({publicId, seq: (this.connections[this.connections.length-1]?.seq ?? 0) + 1});
+                this.connections.splice(0, this.connections.length - 20);
+                this.reconnected?.resolve();
+                this.reconnected = undefined;
             },
             onFileCreated: (parentFolderId:string, type:FileType, entity:FileEntity) => {
                 const res = this._resolveById(parentFolderId);
@@ -519,42 +559,20 @@ export class VirtualFileSystem extends vscode.Disposable {
                 if (res===undefined) { return; }
 
                 const doc = res.fileEntity as DocumentEntity;
-                // An update without `op` is the server's ack of our own write, sent to the
-                // author after the emit callback has already fired. writeFile() has advanced
-                // `doc.version` from that callback, so only catch up if we are still behind,
-                // and never drop the caches over it: with them gone the next save is skipped.
-                if (update.op===undefined) {
-                    if (doc.version!==undefined && update.v>=doc.version) {
-                        doc.version = update.v + 1;
+                // While one of our own updates is being reconciled (see writeFile), hand
+                // its ack over and hold remote ops back until the caches are settled.
+                if (doc.sync) {
+                    if (update.op===undefined) {
+                        if (doc.sync.onAck) { doc.sync.onAck(update.v); } else { doc.sync.earlyAck = update.v; }
+                    } else {
+                        doc.sync.buffered.push(update);
                     }
                     return;
                 }
-                if (update.v===doc.version) {
-                    doc.version += 1;
-                    if (update.op && doc.remoteCache!==undefined) {
-                        let content = doc.remoteCache;
-                        update.op.forEach((op) => {
-                            if (op.i) {
-                                content = content.slice(0, op.p) + op.i + content.slice(op.p);
-                            } else if (op.d) {
-                                const deleteUtf8 = Buffer.from(op.d, 'ascii').toString('utf-8');
-                                content = content.slice(0, op.p) + content.slice(op.p+deleteUtf8.length);
-                            }
-                        });
-                        const _uri = this.pathToUri(res.path).toString();
-                        const _doc = vscode.workspace.textDocuments.find((doc) => doc.uri.toString()===_uri);
-                        // if doc dirty, local cache should diverge from remote cache
-                        if (_doc && !_doc.isDirty) {doc.localCache = content;}
-                        doc.remoteCache = content;
-                        this.isDirty = true;
-                        this.notify([
-                            {type: vscode.FileChangeType.Changed, uri: this.pathToUri(res.path)}
-                        ]);
-                    }
-                } else {
-                    doc.remoteCache = undefined;
-                    doc.localCache = undefined;
-                }
+                // An update without `op` is the ack of one of our own updates that has
+                // already been reconciled: nothing left to do.
+                if (update.op===undefined) { return; }
+                this.applyRemoteUpdate(res.path, doc, update);
             },
             onSpellCheckLanguageUpdated: (language:string) => {
                 if (this.root) {
@@ -576,6 +594,40 @@ export class VirtualFileSystem extends vscode.Disposable {
                 // }
             },
         });
+    }
+
+    /** Apply a remote op for `doc` in order; resync lazily when one was missed. */
+    private applyRemoteUpdate(path: string, doc: DocumentEntity, update: UpdateSchema) {
+        if (doc.version===undefined || doc.remoteCache===undefined) { return; }
+        // already part of the content we hold, e.g. fetched by a re-join
+        if (update.v<doc.version) { return; }
+        if (update.v>doc.version) {
+            // an op was missed: drop the server-side copy but keep `localCache`, the
+            // content the editor is based on, so the next write can still 3-way merge
+            doc.remoteCache = undefined;
+            this.notify([
+                {type: vscode.FileChangeType.Changed, uri: this.pathToUri(path)}
+            ]);
+            return;
+        }
+        doc.version += 1;
+        let content = doc.remoteCache;
+        update.op?.forEach((op) => {
+            if (op.i) {
+                content = content.slice(0, op.p) + op.i + content.slice(op.p);
+            } else if (op.d) {
+                const deleteUtf8 = Buffer.from(op.d, 'ascii').toString('utf-8');
+                content = content.slice(0, op.p) + content.slice(op.p+deleteUtf8.length);
+            }
+        });
+        // `localCache` is not advanced here but when the editor actually reloads the doc
+        // (see openFile): if the user types before that, the reload is skipped and the
+        // next write must still merge this op in rather than overwrite it.
+        doc.remoteCache = content;
+        this.isDirty = true;
+        this.notify([
+            {type: vscode.FileChangeType.Changed, uri: this.pathToUri(path)}
+        ]);
     }
 
     pathToUri(...path: string[]): vscode.Uri {
@@ -626,6 +678,9 @@ export class VirtualFileSystem extends vscode.Disposable {
             const doc = fileEntity as DocumentEntity;
             if (doc.remoteCache!==undefined) {
                 const content = doc.remoteCache;
+                // the editor is about to show this content, so it is the base of its next write
+                const _doc = vscode.workspace.textDocuments.find((d) => d.uri.toString()===uri.toString());
+                if (!_doc || !_doc.isDirty) { doc.localCache = content; }
                 EventBus.fire('fileWillOpenEvent', {uri});
                 return new TextEncoder().encode(content);
             } else {
@@ -846,100 +901,215 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (fileType && fileType==='doc' && fileEntity) {
             const doc = fileEntity as DocumentEntity;
             const _content = new TextDecoder().decode(content);
-            if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
+            // one write per doc at a time: wait until the previous one is reconciled
+            await this.syncSettled(doc);
+            if (doc.unconfirmed) {
+                // An earlier write failed without us knowing whether it reached the server.
+                // Settle it first, so its edit is neither lost nor applied twice.
+                await this.submitWrite(uri, doc, doc.unconfirmed);
+                await this.syncSettled(doc);
+            }
+            if (doc.version===undefined || doc.remoteCache===undefined) {
+                // never read, or dropped after a missed op: fetch the server's copy
+                // instead of silently skipping the write
+                await this.resyncDoc(doc);
+            }
+            const dmp = new DiffMatchPatch();
+            const patches = dmp.patch_make(doc.localCache!,  doc.remoteCache!);
+
+            const mergeResArray = dmp.patch_apply(patches, _content);
+            const mergeRes = mergeResArray[0] as string;
+            const update = {
+                doc: doc._id,
+                lastV: doc.lastVersion,
+                v: doc.version!,
+                // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
+                hash: (()=>{
+                    if (!doc.mtime || Date.now()-doc.mtime>5000) {
+                        doc.mtime = Date.now();
+                        return require('crypto').createHash('sha1').update(
+                            "blob " + mergeRes.length + "\x00" + mergeRes
+                        ).digest('hex');
+                    }
+                })() as string,
+                op: (()=>{
+                    const remoteCacheAscii = Buffer.from(doc.remoteCache!, 'utf-8').toString('utf-8');
+                    const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
+                    let currentPos = 0;
+                    return dmp.diff_main(remoteCacheAscii, mergeResAscii)
+                                .map((part) => {
+                                    // part[0] === -1: delete, 0: equal, 1: insert; part[1]: compared content
+                                    const incCount = part[0] === -1 ? 0 : part[1].length;
+                                    currentPos += incCount;
+                                    // add op when content not equal
+                                    if (part[0] !== 0) {
+                                        return {
+                                            p: currentPos - incCount,
+                                            i: part[0] ===  1 ?  part[1] : undefined,
+                                            d: part[0] === -1 ?  part[1] : undefined,
+                                        };
+                                    }
+                                })
+                                .filter(x => x) as any;
+                })(),
+            };
+            this.isDirty = update.op.length>0;
+            if (update.op.length===0) {
+                // nothing to send: the server already holds this content
+                doc.localCache = _content;
+                doc.remoteCache = mergeRes;
+                setTimeout(() => {
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri: uri}
+                    ]);
+                }, 10);
                 return;
             }
-            // Build the OT update against whatever the caches currently hold, so that a
-            // retry after a resync diffs against the server's content, not stale content.
-            const buildUpdate = () => {
-                const dmp = new DiffMatchPatch();
-                const patches = dmp.patch_make(doc.localCache!,  doc.remoteCache!);
+            await this.submitWrite(uri, doc, {update, mergeRes, content: _content, base: doc.localCache!});
+        }
+    }
 
-                const mergeResArray = dmp.patch_apply(patches, _content);
-                const mergeRes = mergeResArray[0] as string;
-                const update = {
-                    doc: doc._id,
-                    lastV: doc.lastVersion,
-                    v: doc.version!,
-                    // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
-                    hash: (()=>{
-                        if (!doc.mtime || Date.now()-doc.mtime>5000) {
-                            doc.mtime = Date.now();
-                            return require('crypto').createHash('sha1').update(
-                                "blob " + mergeRes.length + "\x00" + mergeRes
-                            ).digest('hex');
-                        }
-                    })() as string,
-                    op: (()=>{
-                        const remoteCacheAscii = Buffer.from(doc.remoteCache!, 'utf-8').toString('utf-8');
-                        const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
-                        let currentPos = 0;
-                        return dmp.diff_main(remoteCacheAscii, mergeResAscii)
-                                    .map((part) => {
-                                        // part[0] === -1: delete, 0: equal, 1: insert; part[1]: compared content
-                                        const incCount = part[0] === -1 ? 0 : part[1].length;
-                                        currentPos += incCount;
-                                        // add op when content not equal
-                                        if (part[0] !== 0) {
-                                            return {
-                                                p: currentPos - incCount,
-                                                i: part[0] ===  1 ?  part[1] : undefined,
-                                                d: part[0] === -1 ?  part[1] : undefined,
-                                            };
-                                        }
-                                    })
-                                    .filter(x => x) as any;
-                    })(),
-                };
-                return {update, mergeRes};
-            };
+    /**
+     * Send one write and, once the server has taken it, hand it to `reconcile`.
+     *
+     * Should the emit fail, the very same update is sent again with `dupIfSource` listing
+     * the connections it was sent over: if an earlier attempt did reach the server after
+     * all (e.g. only the ack was lost to a reconnect), the server then acknowledges it
+     * instead of applying it twice. A write that still fails is kept in `doc.unconfirmed`
+     * and settled the same way before the next write of the doc.
+     */
+    private async submitWrite(uri: vscode.Uri, doc: DocumentEntity, write: PendingWrite) {
+        let lastError: any;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            // Do not let socket.io buffer the update for a connection whose publicId we may
+            // never learn (should it drop again before accepting us): dupIfSource could not
+            // name it. Wait for the connection to be accepted, as the web client does.
+            if (this.reconnected) {
+                await Promise.race([this.reconnected.promise, new Promise(r => setTimeout(r, 15000))]);
+            }
+            write.firstConnection ??= this.connections[this.connections.length-1]?.seq ?? 0;
+            const resend = attempt>0 || doc.unconfirmed===write;
+            // The connection current at the first attempt, or -- as socket.io buffers an emit
+            // made while reconnecting -- any connection accepted since, may have carried it.
+            const sentOver = this.connections.filter(c => c.seq>=write.firstConnection!).map(c => c.publicId);
+            const update = resend ? {...write.update, dupIfSource: sentOver} : write.update;
+            const sync = this.beginSync(doc);
+            try {
+                await this.socket.applyOtUpdate(doc._id, update);
+            } catch (err) {
+                lastError = err;
+                this.endSync(doc, sync);
+                continue;
+            }
+            doc.unconfirmed = undefined;
+            // `localCache` is what the editor holds: the written content. `mergeRes` may also
+            // carry ops from others merged in, which the editor only shows once it reloads.
+            doc.localCache = write.content;
+            doc.remoteCache = write.mergeRes;
+            setTimeout(() => {
+                this.notify([
+                    {type: vscode.FileChangeType.Changed, uri: uri}
+                ]);
+            }, 10);
+            if (this.socket.isUsingAlternativeConnectionScheme) {
+                // this scheme sends no ack: the callback is all there is
+                doc.lastVersion = write.update.v;
+                doc.version = write.update.v + 1;
+                this.endSync(doc, sync);
+            } else {
+                this.reconcile(uri, doc, sync, write);
+            }
+            return;
+        }
+        doc.unconfirmed = write;
+        throw lastError;
+    }
 
-            let lastError: any;
-            for (let attempt = 0; attempt < 2; attempt++) {
-                const {update, mergeRes} = buildUpdate();
-                this.isDirty = (update.op && update.op.length) ? true : false;
-                try {
-                    await this.socket.applyOtUpdate(doc._id, update);
-                    // An op submitted at version v moves the doc to v+1. The author is told so
-                    // only by an op-less `otUpdateApplied`, which arrives after this callback
-                    // and only while the client is in the doc's room — not, e.g., after a
-                    // reconnect that did not re-join the doc. Advance the version here so a
-                    // missing ack cannot leave every later write re-submitting a stale v,
-                    // rejected via `otUpdateError` (no ack) and surfacing as a bogus timeout.
-                    // `onFileChanged` then treats the late ack as a no-op.
-                    if (update.op && update.op.length) {
-                        doc.lastVersion = doc.version;
-                        doc.version! += 1;
+    /**
+     * Settle `doc` after the server took `write`, whose update was based on version `v`.
+     *
+     * The emit callback only means the update was queued. Once it is applied, the server
+     * sends the author an op-less `otUpdateApplied {v'}`, `v'` being the version it was
+     * applied at: after any op from others applied first, which reaches us before the ack.
+     * No ack arrives at all while this client is not in the doc's room, e.g. after a
+     * reconnect that did not re-join the doc; every later write would then be submitted
+     * at a stale version.
+     */
+    private async reconcile(uri: vscode.Uri, doc: DocumentEntity, sync: NonNullable<DocumentEntity['sync']>,
+                            write: PendingWrite) {
+        const baseVersion = write.update.v;
+        let resubmit = false;
+        const ackVersion = sync.earlyAck ?? await new Promise<number|undefined>((resolve) => {
+            const timer = setTimeout(() => resolve(undefined), VirtualFileSystem.ownUpdateAckTimeoutMs);
+            sync.onAck = (v:number) => { clearTimeout(timer); resolve(v); };
+        });
+        sync.onAck = undefined;
+        try {
+            if (ackVersion===baseVersion) {
+                // applied as sent: our content is exactly the server's
+                doc.lastVersion = baseVersion;
+                doc.version = baseVersion + 1;
+            } else {
+                // Ops from others went first and ours was transformed against them, or there
+                // was no ack. Read the doc back; joining it also puts us back in its room.
+                await this.resyncDoc(doc);
+                if (ackVersion===undefined && doc.version===baseVersion) {
+                    // Nothing was applied, e.g. the server rejected the update. Keep the old
+                    // base, so a later write still carries this edit, and do not reload the
+                    // editor over it; send it once more (dupIfSource guards against a late one).
+                    doc.localCache = write.base;
+                    if (!write.resubmitted) {
+                        write.resubmitted = true;
+                        doc.unconfirmed = write;
+                        resubmit = true;
                     }
-                    doc.localCache = mergeRes;
-                    doc.remoteCache = mergeRes;
-                    setTimeout(() => {
-                        this.notify([
-                            {type: vscode.FileChangeType.Changed, uri: uri}
-                        ]);
-                    }, 10);
-                    return;
-                } catch (err) {
-                    lastError = err;
-                    if (attempt > 0) { break; }
-                    // Re-join the doc to resync version and content, then rebuild the op
-                    // against what the server actually holds and try once more. This also
-                    // recovers when the real-time session was dropped underneath us.
-                    try {
-                        const rejoin = await this.socket.joinDoc(doc._id);
-                        const remote = rejoin.docLines.join('\n');
-                        doc.version = rejoin.version;
-                        doc.lastVersion = rejoin.version;
-                        doc.remoteCache = remote;
-                        doc.localCache = remote;
-                        doc.mtime = undefined;
-                    } catch {
-                        break;
-                    }
+                } else {
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri: uri}
+                    ]);
                 }
             }
-            throw lastError;
+        } catch {
+            doc.remoteCache = undefined; // re-read on the next read or write
         }
+        this.endSync(doc, sync);
+        if (resubmit && doc.unconfirmed===write && !doc.sync) {
+            this.submitWrite(uri, doc, write).catch(() => {});
+        }
+    }
+
+    private async syncSettled(doc: DocumentEntity) {
+        while (doc.sync) { await doc.sync.done; }
+    }
+
+    private beginSync(doc: DocumentEntity) {
+        let release!: () => void;
+        const done = new Promise<void>((resolve) => { release = resolve; });
+        const sync = {done, release, buffered: [] as UpdateSchema[]};
+        doc.sync = sync;
+        return sync;
+    }
+
+    /** Finish a sync: apply the remote ops held back meanwhile and let the next write go. */
+    private endSync(doc: DocumentEntity, sync: NonNullable<DocumentEntity['sync']>) {
+        if (doc.sync!==sync) { return; }
+        doc.sync = undefined;
+        const res = this._resolveById(doc._id);
+        if (res) {
+            sync.buffered.forEach((update) => this.applyRemoteUpdate(res.path, doc, update));
+        }
+        sync.release();
+    }
+
+    /** Fetch the server's copy of `doc`. `localCache` is kept: it is what the editor is based on. */
+    private async resyncDoc(doc: DocumentEntity) {
+        const res = await this.socket.joinDoc(doc._id);
+        const content = res.docLines.join('\n');
+        doc.version = res.version;
+        doc.lastVersion = res.version;
+        doc.remoteCache = content;
+        if (doc.localCache===undefined) { doc.localCache = content; }
+        doc.mtime = undefined;
     }
 
     async mkdir(uri: vscode.Uri) {
