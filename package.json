@@ -533,6 +533,12 @@
           "default": true,
           "scope": "machine",
           "markdownDescription": "%configuration.formatWithLineBreak.enabled.markdownDescription%"
+        },
+        "overleaf-workshop.login.browserPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "%configuration.login.browserPath.markdownDescription%"
         }
       }
     },
