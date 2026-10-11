@@ -69,8 +69,17 @@ class CompileDiagnosticProvider {
         const vfs = await this.vfsm.prefetch(uri);
         const logPath = `${OUTPUT_FOLDER_NAME}/output.log`;
         const _uri = vfs.pathToUri(logPath);
-        let content ='';
-        content = new TextDecoder().decode(await vfs.openFile(_uri));
+        let content = '';
+        try {
+            const fileData = await vfs.openFile(_uri);
+            content = new TextDecoder().decode(fileData);
+        } catch (error) {
+            if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
+                return false;
+            }
+            console.error('Error reading log file:', error);
+            throw error; // Re-throw unexpected errors
+        }
         const logs = new LatexParser(content).parse();
         if (logs === undefined) {
             return content === ''? true :false;
