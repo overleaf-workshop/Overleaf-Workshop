@@ -9,6 +9,7 @@ import { ClientManager } from '../collaboration/clientManager';
 import { EventBus } from '../utils/eventBus';
 import { SCMCollectionProvider } from '../scm/scmCollectionProvider';
 import { ExtendedBaseAPI, ProjectLinkedFileProvider, UrlLinkedFileProvider } from '../api/extendedBase';
+import { threeWayMerge, tryTrivialMerge } from '../utils/threeWayMerge';
 
 const __OUTPUTS_ID = `${ROOT_NAME}-outputs`;
 
@@ -34,6 +35,8 @@ export interface DocumentEntity extends FileEntity {
     lastVersion?: number,
     localCache?: string,
     remoteCache?: string,
+    /** Server state at the moment a conflict was detected. When set, the next writeFile is a post-conflict resolution save; the OT op is computed from this base, then the field is cleared. */
+    _otBase?: string,
 }
 
 export interface FileRefEntity extends FileEntity {
@@ -839,11 +842,58 @@ export class VirtualFileSystem extends vscode.Disposable {
             if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
                 return;
             }
-            const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(doc.localCache,  doc.remoteCache);
 
-            const mergeResArray = dmp.patch_apply(patches, _content);
-            const mergeRes = mergeResArray[0] as string;
+            // If _otBase is set, a previous conflict was detected and the user has
+            // since resolved the markers. Skip merge — compute the OT op from the
+            // real server state stored in _otBase.
+            let mergeRes: string;
+            let hasConflict = false;
+
+            if (doc._otBase !== undefined) {
+                doc.remoteCache = doc._otBase;
+                delete doc._otBase;
+                mergeRes = _content;
+            } else {
+                // Perform a proper three-way merge (like Git's diff3) using:
+                //   base  = doc.localCache (what we last agreed on locally)
+                //   local = _content (user's current edits)
+                //   remote = doc.remoteCache (latest known server state)
+                const trivial = tryTrivialMerge(doc.localCache, _content, doc.remoteCache);
+                if (trivial !== undefined) {
+                    mergeRes = trivial;
+                } else {
+                    const mergeResult = threeWayMerge(doc.localCache, _content, doc.remoteCache);
+                    mergeRes = mergeResult.content;
+                    hasConflict = mergeResult.hasConflict;
+                }
+            }
+
+            if (hasConflict) {
+                // Conflicts detected: write conflict markers to disk so VS Code's
+                // built-in merge conflict UI can help the user resolve them.
+                // Do NOT send an OT update to the server while conflicts exist.
+                // Preserve the server state in _otBase so the post-resolution
+                // save can compute the OT op from the correct base.
+                const conflictContent = new TextEncoder().encode(mergeRes);
+                await vscode.workspace.fs.writeFile(uri, conflictContent);
+                doc._otBase = doc.remoteCache;
+                doc.localCache = mergeRes;
+                this.isDirty = true;
+
+                vscode.window.showWarningMessage(
+                    vscode.l10n.t('Merge conflict detected in "{0}". Your changes overlap with changes from the server. Please review the conflict markers in the editor and save after resolving.', doc.name)
+                );
+
+                setTimeout(() => {
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri: uri}
+                    ]);
+                }, 10);
+                return;
+            }
+
+            // No conflict: proceed with the merged content
+            const dmp = new DiffMatchPatch();
             const update = {
                 doc: doc._id,
                 lastV: doc.lastVersion,

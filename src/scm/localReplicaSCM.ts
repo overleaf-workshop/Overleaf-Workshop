@@ -3,6 +3,7 @@ import * as DiffMatchPatch from 'diff-match-patch';
 import { minimatch } from 'minimatch';
 import { BaseSCM, CommitItem, SettingItem } from ".";
 import { VirtualFileSystem, parseUri } from '../core/remoteFileSystemProvider';
+import { threeWayMerge, tryTrivialMerge } from '../utils/threeWayMerge';
 
 const IGNORE_SETTING_KEY = 'ignore-patterns';
 
@@ -249,20 +250,46 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                     this.setBypassCache(relPath, remoteContent);
                     await this.writeFile(relPath, remoteContent);
                 } else {
-                    const dmp = new DiffMatchPatch();
                     const baseContentStr = new TextDecoder().decode(baseContent);
                     const localContentStr = new TextDecoder().decode(localContent);
                     const remoteContentStr = new TextDecoder().decode(remoteContent);
-                    // merge local and remote changes
-                    const localPatches = dmp.patch_make( baseContentStr, localContentStr );
-                    const remotePatches = dmp.patch_make( baseContentStr, remoteContentStr );
-                    const [mergedContentStr, _results] = dmp.patch_apply( remotePatches, localContentStr );
-                    // write the merged content to local
+
+                    // Perform a proper three-way merge (like Git's diff3):
+                    //   base   = last known common state
+                    //   local  = current local file content
+                    //   remote = current remote (VFS) file content
+                    //
+                    // First try trivial merges:
+                    let mergedContentStr = tryTrivialMerge(baseContentStr, localContentStr, remoteContentStr);
+                    let hasConflict = false;
+
+                    if (mergedContentStr === undefined) {
+                        // Need full three-way merge
+                        const mergeResult = threeWayMerge(baseContentStr, localContentStr, remoteContentStr);
+                        mergedContentStr = mergeResult.content;
+                        hasConflict = mergeResult.hasConflict;
+                    }
+
                     const mergedContent = new TextEncoder().encode(mergedContentStr);
-                    await this.writeFile(relPath, mergedContent);
-                    // write the merged content to remote
-                    if (localPatches.length!==0) {
-                        await vscode.workspace.fs.writeFile(vfsUri, mergedContent);
+
+                    if (hasConflict) {
+                        // Write conflicted content with markers to local only.
+                        // Do NOT push to remote — the user must resolve conflicts first.
+                        await this.writeFile(relPath, mergedContent);
+                        this.setBypassCache(relPath, mergedContent);
+                        vscode.window.showWarningMessage(
+                            vscode.l10n.t('Merge conflict in "{0}". Local and remote changes overlap. Conflict markers have been inserted — please review and resolve, then save.', relPath)
+                        );
+                    } else {
+                        // No conflict: write merged content to local
+                        await this.writeFile(relPath, mergedContent);
+                        // Push merged content to remote if local had changes
+                        const dmp = new DiffMatchPatch();
+                        const localPatches = dmp.patch_make( baseContentStr, localContentStr );
+                        if (localPatches.length!==0) {
+                            await vscode.workspace.fs.writeFile(vfsUri, mergedContent);
+                        }
+                        this.setBypassCache(relPath, mergedContent);
                     }
                 }
             }
