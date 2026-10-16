@@ -67,6 +67,13 @@ vsce package
 ```
 
 ### Testing
+
+Run the API regression tests without launching VSCode:
+
+```bash
+npm run test:api
+```
+
 In VSCode, press <kbd>F5</kbd> to start debugging. A new VSCode window will be opened with the extension loaded.
 
 ### Documentation
