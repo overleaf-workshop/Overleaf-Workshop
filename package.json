@@ -790,6 +790,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
+    "test:api": "tsc -p ./ && node --test out/test/base.test.js",
     "prepare": "husky install"
   },
   "dependencies": {
