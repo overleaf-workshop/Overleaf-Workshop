@@ -10,10 +10,15 @@ export class PdfDocument implements vscode.CustomDocument {
     readonly onDidChange = this._onDidChange.event;
 
     constructor(readonly uri: vscode.Uri) {
-        if (uri.scheme !== ROOT_NAME) {
-            throw new Error(`Invalid uri scheme: ${uri}`);
-        }
         this.uri = uri;
+    }
+
+    /**
+     * A user-level editor association such as `"*.pdf": "overleaf-workshop.pdfViewer"`
+     * routes local PDFs here as well, bypassing the `overleaf-workshop:` selector (#378).
+     */
+    get isProjectFile(): boolean {
+        return this.uri.scheme === ROOT_NAME;
     }
 
     dispose() { }
@@ -57,7 +62,10 @@ export class PdfViewEditorProvider implements vscode.CustomEditorProvider<PdfDoc
     }
 
     public async resolveCustomEditor(doc: PdfDocument, webviewPanel: vscode.WebviewPanel): Promise<void> {
-        EventBus.fire('pdfWillOpenEvent', {uri: doc.uri, doc, webviewPanel});
+        // local PDFs are only displayed, they are not tied to a project
+        if (doc.isProjectFile) {
+            EventBus.fire('pdfWillOpenEvent', {uri: doc.uri, doc, webviewPanel});
+        }
 
         const updateWebview = () => {
             if (doc.cache.buffer.byteLength !== 0) {
@@ -78,14 +86,16 @@ export class PdfViewEditorProvider implements vscode.CustomEditorProvider<PdfDoc
 
         // register event listeners
         webviewPanel.onDidChangeViewState((e) => {
-            if (e.webviewPanel.active) {
+            if (e.webviewPanel.active && doc.isProjectFile) {
                 EventBus.fire('fileWillOpenEvent', {uri: doc.uri});
             }
         });
         webviewPanel.webview.onDidReceiveMessage((e) => {
             switch (e.type) {
                 case 'syncPdf':
-                    vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.syncPdf`, e.content);
+                    if (doc.isProjectFile) {
+                        vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.syncPdf`, e.content);
+                    }
                     break;
                 case 'saveState':
                     GlobalStateManager.updatePdfViewPersist(this.context, doc.uri.toString(), e.content);
