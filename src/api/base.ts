@@ -2,8 +2,14 @@
 import * as stream from 'stream';
 import * as FormData from 'form-data';
 import { v4 as uuidv4 } from 'uuid';
-import { fetch } from 'undici';
+import { Agent, fetch } from 'undici';
 import { FileEntity, FileType, FolderEntity, OutputFileEntity } from '../core/remoteFileSystemProvider';
+
+function errorMessage(error: any): string {
+    const cause = error?.cause?.message;
+    const message = error?.message ?? String(error);
+    return cause ? `${message}: ${cause}` : message;
+}
 
 /** Extract set-cookie headers from an undici/Response object. */
 function getSetCookie(res: any): string[] {
@@ -200,6 +206,10 @@ export interface ResponseSchema {
 }
 
 export class BaseAPI {
+    /** A download fails when the server sends nothing for this long (undici waits five minutes). */
+    static downloadIdleTimeoutMs = 60 * 1000;
+    private static downloadAgent?: {timeoutMs: number, agent: Agent};
+
     private url: string;
     private identity?: Identity;
 
@@ -472,30 +482,59 @@ export class BaseAPI {
         };
     }
 
-    protected async download(route:string) {
-        if (this.identity===undefined) { return Promise.reject(); }
+    /**
+     * Download `route` from the web frontend.
+     *
+     * Throws unless the server answers 200. A failed download must never look like an
+     * empty file, or the local replica writes that empty file over the real content.
+     */
+    protected async download(route:string): Promise<Buffer> {
+        if (this.identity===undefined) { return Promise.reject(new Error('Not logged in.')); }
+        return this.fetchContent(this.url+route, {'Cookie': this.identity.cookies});
+    }
 
-        let content: Buffer[] = [];
-        while(true) {
-            const res = await fetch(this.url+route, {
-                method: 'GET', redirect: 'manual',
-                headers: {
-                    'Connection': 'keep-alive',
-                    'Cookie': this.identity.cookies,
+    private static get downloadDispatcher(): Agent {
+        const timeoutMs = BaseAPI.downloadIdleTimeoutMs;
+        if (BaseAPI.downloadAgent?.timeoutMs!==timeoutMs) {
+            BaseAPI.downloadAgent = {
+                timeoutMs,
+                agent: new Agent({headersTimeout: timeoutMs, bodyTimeout: timeoutMs}),
+            };
+        }
+        return BaseAPI.downloadAgent.agent;
+    }
+
+    /**
+     * GET `url` and return the response body. Network errors and transient statuses are
+     * retried as in `request`; any other status than 200 throws.
+     */
+    private async fetchContent(url: string, headers: Record<string, string>): Promise<Buffer> {
+        const MAX_HTTP_RETRIES = 2;
+        for (let attempt = 0; ; attempt++) {
+            let status: number | undefined;
+            let message: string;
+            try {
+                const res = await fetch(url, {
+                    method: 'GET', redirect: 'manual',
+                    headers: {'Connection': 'keep-alive', ...headers},
+                    dispatcher: BaseAPI.downloadDispatcher,
+                });
+                if (res.status===200) {
+                    return Buffer.from(await res.arrayBuffer());
                 }
-            });
-            if (res.status===200) {
-                content.push(Buffer.from(await res.arrayBuffer()));
-                break;
+                status = res.status;
+                message = `HTTP ${res.status}`;
+                await res.body?.cancel().catch(() => {});
+            } catch (err: any) {
+                message = errorMessage(err);
             }
-            else if (res.status===206) {
-                content.push(Buffer.from(await res.arrayBuffer()));
-            } else {
-                break;
+            if (attempt>=MAX_HTTP_RETRIES || !this.isTransientError(status, message)) {
+                throw new Error(`Download failed (${message}): ${url}`);
             }
-        };
-
-        return Buffer.concat(content);
+            const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
+            console.log(`Download of ${url} failed (${message}), retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_HTTP_RETRIES})`);
+            await new Promise(r => setTimeout(r, delayMs));
+        }
     }
 
     async logout(identity:Identity): Promise<ResponseSchema> {
@@ -579,13 +618,14 @@ export class BaseAPI {
         return this.request('DELETE', `project/${projectId}/trash`);
     }
 
-    async getFile(identity:Identity, projectId:string, fileId:string) {
+    async getFile(identity:Identity, projectId:string, fileId:string): Promise<ResponseSchema> {
         this.setIdentity(identity);
-        const content = await this.download(`project/${projectId}/file/${fileId}`);
-        return {
-            type: 'success',
-            content: new Uint8Array( content )
-        };
+        try {
+            const content = await this.download(`project/${projectId}/file/${fileId}`);
+            return {type: 'success', content: new Uint8Array(content)};
+        } catch (error) {
+            return {type: 'error', message: errorMessage(error)};
+        }
     }
 
     async addDoc(identity:Identity, projectId:string, parentFolderId:string, filename:string) {
@@ -754,52 +794,39 @@ export class BaseAPI {
         return this.request('POST', `project/${projectId}/settings`, setting);
     }
 
-    async getFileFromClsi(identity:Identity, url:string, compileGroup:string, clsiServerId?:string, pdfDownloadDomain?:string) {
-        // If we have a CDN download domain, construct the full URL with required query params.
-        // The CDN is cross-origin, so we must NOT send web frontend cookies.
-        if (pdfDownloadDomain && clsiServerId) {
-            const cdnUrl = `${pdfDownloadDomain.replace(/\/+$/, '')}/${url.replace(/^\/+/g, '')}` +
-                `?compileGroup=${encodeURIComponent(compileGroup)}` +
-                `&clsiserverid=${encodeURIComponent(clsiServerId)}` +
-                `&enable_pdf_caching=true`;
-            const content = await this._downloadAbsolute(cdnUrl, false);
-            return { type: 'success', content: new Uint8Array(content) };
-        }
+    async getFileFromClsi(identity:Identity, url:string, compileGroup:string, clsiServerId?:string, pdfDownloadDomain?:string): Promise<ResponseSchema> {
+        try {
+            // If we have a CDN download domain, construct the full URL with required query params.
+            // The CDN is cross-origin, so we must NOT send web frontend cookies.
+            if (pdfDownloadDomain && clsiServerId) {
+                const cdnUrl = `${pdfDownloadDomain.replace(/\/+$/, '')}/${url.replace(/^\/+/g, '')}` +
+                    `?compileGroup=${encodeURIComponent(compileGroup)}` +
+                    `&clsiserverid=${encodeURIComponent(clsiServerId)}` +
+                    `&enable_pdf_caching=true`;
+                const content = await this._downloadAbsolute(cdnUrl, false);
+                return { type: 'success', content: new Uint8Array(content) };
+            }
 
-        // Fallback: download from web frontend (legacy path)
-        url = url.replace(/^\/+/g, '');
-        this.setIdentity(identity);
-        const content = await this.download(url);
-        return {
-            type: 'success',
-            content: new Uint8Array( content )
-        };
+            // Fallback: download from web frontend (legacy path)
+            url = url.replace(/^\/+/g, '');
+            this.setIdentity(identity);
+            const content = await this.download(url);
+            return {
+                type: 'success',
+                content: new Uint8Array( content )
+            };
+        } catch (error) {
+            return {type: 'error', message: errorMessage(error)};
+        }
     }
 
     /** Download from an absolute URL, optionally including web frontend cookies. */
     private async _downloadAbsolute(absoluteUrl: string, includeCookies: boolean): Promise<Buffer> {
-        const headers: Record<string, string> = {
-            'Connection': 'keep-alive',
-        };
+        const headers: Record<string, string> = {};
         if (includeCookies && this.identity) {
             headers['Cookie'] = this.identity.cookies;
         }
-        let content: Buffer[] = [];
-        while (true) {
-            const res = await fetch(absoluteUrl, {
-                method: 'GET', redirect: 'manual',
-                headers
-            });
-            if (res.status === 200) {
-                content.push(Buffer.from(await res.arrayBuffer()));
-                break;
-            } else if (res.status === 206) {
-                content.push(Buffer.from(await res.arrayBuffer()));
-            } else {
-                break;
-            }
-        }
-        return Buffer.concat(content);
+        return this.fetchContent(absoluteUrl, headers);
     }
 
     async proxySyncPdf(identity:Identity, projectId:string, page:number, h:number, v:number, buildId:string) {
@@ -883,13 +910,14 @@ export class BaseAPI {
         });
     }
 
-    async downloadZipOfVersion(identity:Identity, projectId:string, version:number) {
+    async downloadZipOfVersion(identity:Identity, projectId:string, version:number): Promise<ResponseSchema> {
         this.setIdentity(identity);
-        const content = await this.download(`project/${projectId}/version/${version}/zip`);
-        return {
-            type: 'success',
-            content: new Uint8Array(content)
-        };
+        try {
+            const content = await this.download(`project/${projectId}/version/${version}/zip`);
+            return {type: 'success', content: new Uint8Array(content)};
+        } catch (error) {
+            return {type: 'error', message: errorMessage(error)};
+        }
     }
 
     async getLabels(identity:Identity, projectId:string) {

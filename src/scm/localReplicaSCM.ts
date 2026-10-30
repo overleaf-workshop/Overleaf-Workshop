@@ -236,37 +236,48 @@ export class LocalReplicaSCMProvider extends BaseSCM {
 
             // sync the files
             const total = files.length;
+            const failed: string[] = [];
             for (let i=0; i<total; i++) {
                 const [name, relPath] = files[i];
                 const vfsUri = this.vfs.pathToUri(relPath);
                 if (token.isCancellationRequested) { return false; }
                 progress.report({increment: 100/total, message: relPath});
                 //
-                const baseContent = this.baseCache[relPath];
-                const localContent = await this.readFile(relPath);
-                const remoteContent = await vscode.workspace.fs.readFile(vfsUri);
-                if (baseContent===undefined || localContent===undefined) {
-                    this.setBypassCache(relPath, remoteContent);
-                    await this.writeFile(relPath, remoteContent);
-                } else {
-                    const dmp = new DiffMatchPatch();
-                    const baseContentStr = new TextDecoder().decode(baseContent);
-                    const localContentStr = new TextDecoder().decode(localContent);
-                    const remoteContentStr = new TextDecoder().decode(remoteContent);
-                    // merge local and remote changes
-                    const localPatches = dmp.patch_make( baseContentStr, localContentStr );
-                    const remotePatches = dmp.patch_make( baseContentStr, remoteContentStr );
-                    const [mergedContentStr, _results] = dmp.patch_apply( remotePatches, localContentStr );
-                    // write the merged content to local
-                    const mergedContent = new TextEncoder().encode(mergedContentStr);
-                    await this.writeFile(relPath, mergedContent);
-                    // write the merged content to remote
-                    if (localPatches.length!==0) {
-                        await vscode.workspace.fs.writeFile(vfsUri, mergedContent);
+                try {
+                    const baseContent = this.baseCache[relPath];
+                    const localContent = await this.readFile(relPath);
+                    const remoteContent = await vscode.workspace.fs.readFile(vfsUri);
+                    if (baseContent===undefined || localContent===undefined) {
+                        this.setBypassCache(relPath, remoteContent);
+                        await this.writeFile(relPath, remoteContent);
+                    } else {
+                        const dmp = new DiffMatchPatch();
+                        const baseContentStr = new TextDecoder().decode(baseContent);
+                        const localContentStr = new TextDecoder().decode(localContent);
+                        const remoteContentStr = new TextDecoder().decode(remoteContent);
+                        // merge local and remote changes
+                        const localPatches = dmp.patch_make( baseContentStr, localContentStr );
+                        const remotePatches = dmp.patch_make( baseContentStr, remoteContentStr );
+                        const [mergedContentStr, _results] = dmp.patch_apply( remotePatches, localContentStr );
+                        // write the merged content to local
+                        const mergedContent = new TextEncoder().encode(mergedContentStr);
+                        await this.writeFile(relPath, mergedContent);
+                        // write the merged content to remote
+                        if (localPatches.length!==0) {
+                            await vscode.workspace.fs.writeFile(vfsUri, mergedContent);
+                        }
                     }
+                } catch (error) {
+                    // keep the local copy as it is and go on with the other files
+                    console.error(`Sync of "${relPath}" failed:`, error);
+                    failed.push(relPath);
                 }
             }
 
+            if (failed.length!==0) {
+                const list = failed.slice(0, 5).join(', ') + (failed.length>5 ? ', ...' : '');
+                vscode.window.showWarningMessage( vscode.l10n.t('{count} files could not be synced and keep their local content: {files}', {count: failed.length, files: list}) );
+            }
             return true;
         });
     }
