@@ -373,7 +373,6 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         this.localWatcher = vscode.workspace.createFileSystemWatcher(
             new vscode.RelativePattern( this.baseUri.path, '**/*' )
         );
-        await this.overwrite();
 
         const syncOnFileChange = vscode.workspace
             .getConfiguration('overleaf-workshop.localReplica.syncOnFileChange')
@@ -386,7 +385,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
             ? this.localWatcher.onDidChange(async uri => await this.syncToVFS(uri, 'update'))
             : vscode.workspace.onDidSaveTextDocument(doc => this.onDocumentSaved(doc));
 
-        return [
+        const listeners = [
             // sync from vfs to local
             this.vfsWatcher.onDidChange(async uri => await this.syncFromVFS(uri, 'update')),
             this.vfsWatcher.onDidCreate(async uri => await this.syncFromVFS(uri, 'update')),
@@ -397,6 +396,30 @@ export class LocalReplicaSCMProvider extends BaseSCM {
             this.localWatcher.onDidCreate(async uri => await this.syncToVFS(uri, 'update')),
             this.localWatcher.onDidDelete(async uri => await this.syncToVFS(uri, 'delete')),
         ];
+
+        // The first sync runs in the background. The listeners above are already active,
+        // so changes on either side keep syncing when it fails or is cancelled.
+        this.firstSync();
+        return listeners;
+    }
+
+    private async firstSync() {
+        const retry = vscode.l10n.t('Retry');
+        let message: string | undefined;
+        try {
+            if (!await this.overwrite()) {
+                message = vscode.l10n.t('The first sync of "{path}" was cancelled. Only changes made from now on are synced.', {path: this.baseUri.fsPath});
+            }
+        } catch (error) {
+            console.error('Local Replica: the first sync failed.', error);
+            message = vscode.l10n.t('The first sync of "{path}" failed: {error}. Only changes made from now on are synced.', {path: this.baseUri.fsPath, error: String((error as Error)?.message ?? error)});
+        }
+        if (message!==undefined) {
+            const choice = await vscode.window.showWarningMessage(message, retry);
+            if (choice===retry) {
+                await this.firstSync();
+            }
+        }
     }
 
     writeFile(relPath: string, content: Uint8Array): Thenable<void> {
