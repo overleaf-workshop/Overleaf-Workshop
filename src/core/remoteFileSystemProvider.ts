@@ -611,6 +611,9 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (!fileEntity) {
             throw vscode.FileSystemError.FileNotFound();
         }
+        if (fileType==='folder') {
+            throw vscode.FileSystemError.FileIsADirectory(uri);
+        }
 
         if (fileType==='doc') {
             const doc = fileEntity as DocumentEntity;
@@ -633,7 +636,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             .then((identity) => {
                 return this.api.getFileFromClsi(identity, (fileEntity as OutputFileEntity).url, compileGroup || 'standard', clsiServerId, pdfDownloadDomain)
                 .then((res) => {
-                    if (res.type==='success') {
+                    if (res.type==='success' && res.content) {
                         EventBus.fire('fileWillOpenEvent', {uri});
                         return res.content;
                     } else {
@@ -649,7 +652,9 @@ export class VirtualFileSystem extends vscode.Disposable {
                 EventBus.fire('fileWillOpenEvent', {uri});
                 return res.content;
             } else {
-                return new Uint8Array(0);
+                // An empty buffer would be taken for the file's content, and the local
+                // replica would write it over the real file.
+                throw vscode.FileSystemError.Unavailable(`${uri.path}: ${res.message}`);
             }
         }
     }
@@ -1287,6 +1292,9 @@ export class VirtualFileSystem extends vscode.Disposable {
     async downloadProjectArchive(version: number) {
         const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
         const res = await this.api.downloadZipOfVersion(identity, this.projectId, version);
+        if (res.type!=='success' || res.content===undefined) {
+            throw new Error(res.message);
+        }
         return res.content;
     }
 

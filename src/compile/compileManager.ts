@@ -202,10 +202,14 @@ export class CompileManager {
         if (uri) {
             this.vfsm.prefetch(uri)
                 .then(async (vfs) => {
-                    const content = new TextDecoder().decode( await vfs?.openFile(uri) );
-                    const match = RegExp(documentClassRegex).exec(content);
-                    const fileId = (await vfs._resolveUri(uri)).fileId;
-                    const rootDocId = match ? fileId : undefined;
+                    // Compile the open document as the main document when it has a
+                    // \documentclass. For a local replica `uri` is the project folder.
+                    const {fileType, fileId} = await vfs._resolveUri(uri);
+                    let rootDocId: string | undefined = undefined;
+                    if (fileType==='doc') {
+                        const content = new TextDecoder().decode( await vfs.openFile(uri) );
+                        rootDocId = RegExp(documentClassRegex).exec(content) ? fileId : undefined;
+                    }
                     return await vfs.compile(force, this.compileAsDraft, this.compileStopOnFirstError, rootDocId);
                 })
                 .then(async (res) => {

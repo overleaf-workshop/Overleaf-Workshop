@@ -276,7 +276,13 @@ class HistoryDataProvider implements vscode.TreeDataProvider<HistoryItem>, vscod
                 const uri = vscode.workspace.workspaceFolders?.[0].uri;
                 if (!uri) { return; }
                 const version = item.version;
-                const content = await this.vfs.downloadProjectArchive(version);
+                let content: Uint8Array;
+                try {
+                    content = await this.vfs.downloadProjectArchive(version);
+                } catch (error) {
+                    vscode.window.showErrorMessage( vscode.l10n.t('Download of project v{version} failed: {error}', {version, error: String((error as Error)?.message ?? error)}) );
+                    return;
+                }
                 const filename = `${this.vfs.projectName}-v${version}.zip`;
 
                 const savePath = await vscode.window.showSaveDialog({
