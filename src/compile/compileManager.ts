@@ -194,9 +194,11 @@ export class CompileManager {
         return uri;
     }
 
-    async compile(force:boolean=false) {
+    async compile(force:boolean=false, save:boolean=true) {
         if (this.inCompiling) { return; }
-        await vscode.workspace.saveAll(); // save all dirty files
+        if (save) {
+            await vscode.workspace.saveAll(); // save all dirty files
+        }
 
         const uri = await this.update('compiling');
         if (uri) {
@@ -449,7 +451,10 @@ export class CompileManager {
             // register status bar
             this.status,
             // register compile commands
-            vscode.commands.registerCommand(`${ROOT_NAME}.compileManager.compile`, () => this.compile(true)),
+            // `{save:false}` compiles what is on the server without saving the editors first
+            // (menus may pass a file URI as the first argument: that still saves)
+            vscode.commands.registerCommand(`${ROOT_NAME}.compileManager.compile`,
+                (options?: {save?: boolean}) => this.compile(true, options?.save !== false)),
             vscode.commands.registerCommand(`${ROOT_NAME}.compileManager.viewPdf`, () =>  this.openPdf()),
             vscode.commands.registerCommand(`${ROOT_NAME}.compileManager.syncCode`, () => this.syncCode()),
             vscode.commands.registerCommand(`${ROOT_NAME}.compileManager.syncPdf`, (r) => this.syncPdf(r)),
