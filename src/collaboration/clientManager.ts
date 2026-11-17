@@ -52,6 +52,26 @@ function formatTime(timestamp:number) {
     return `${hoursStr}${minutesStr}${secondsStr}`;
 }
 
+/** Shows a project that is not joined: yellow while it reconnects by itself, red once it
+ *  gave up (click for Retry or Reload). Used by the collaboration item, and before the
+ *  first join, when that item does not exist yet, by the file system's own item. */
+export function showConnectionProblem(item: vscode.StatusBarItem, status: {state: string, attempt: number, detail?: string}) {
+    item.backgroundColor = undefined;
+    if (status.state === 'offline') {
+        item.color = 'red';
+        item.text = '$(sync-ignored)';
+        item.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Not connected. Automatic reconnecting gave up; click for Retry or Reload.')}`;
+        item.command = `${ROOT_NAME}.remoteFileSystem.reconnect`;
+    } else {
+        item.color = new vscode.ThemeColor('statusBarItem.warningBackground');
+        item.text = '$(sync~spin) ' + vscode.l10n.t('Reconnecting...') + (status.attempt > 0 ? ` ${status.attempt}` : '');
+        item.tooltip = `${ELEGANT_NAME}: ` +
+            vscode.l10n.t('Not connected, reconnecting automatically (attempt {attempt}).', {attempt: status.attempt}) +
+            (status.detail ? ' ' + status.detail : '');
+        item.command = undefined;
+    }
+}
+
 export class ClientManager {
     private activeExists?: string;
     private inactivateTask?: NodeJS.Timeout;
@@ -104,7 +124,7 @@ export class ClientManager {
                     this.updatePosition(user.client_id, onlineUser.doc_id, onlineUser.row, onlineUser.column, onlineUser);
                 }
             });
-        });
+        }).catch(() => {}); // best effort: the collaborator list is refreshed by later events
 
         this.chatViewer = new ChatViewProvider(this.vfs, this.publicId, this.context.extensionUri, this.socket);
         this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
@@ -247,24 +267,14 @@ export class ClientManager {
 
     private updateStatus() {
         const count = Object.keys(this.onlineUsers).length;
-        if (!this.connectedFlag) {
-            const disconnectedDuration = Date.now() - this.disconnectedAt;
-            // Show reconnecting state during grace period
-            if (disconnectedDuration < ClientManager.DISCONNECT_GRACE_PERIOD_MS) {
-                this.status.color = new vscode.ThemeColor('statusBarItem.warningBackground');
-                this.status.backgroundColor = undefined;
-                this.status.text = '$(sync~spin) ' + vscode.l10n.t('Reconnecting...');
-                this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Connection interrupted, attempting to reconnect...')}`;
-                this.status.command = `${ROOT_NAME}.collaboration.settings`;
-                // Keep online user decorations during brief disconnections
-            } else {
-                // Grace period expired: show disconnected state
-                this.status.color = 'red';
-                this.status.backgroundColor = undefined;
-                this.status.text = '$(sync-ignored)';
-                this.status.tooltip = `${ELEGANT_NAME}: ${vscode.l10n.t('Not connected')}`;
-                this.status.command = `${ROOT_NAME}.collaboration.settings`;
-                // Clear online user decorations after grace period
+        // The project's state, not the socket's: a socket can be connected while the
+        // project is not joined (offline rejoin, or a reconnect before joinProject).
+        const connection = this.vfs.connectionStatus;
+        if (connection.state !== 'connected' || !this.connectedFlag) {
+            if (this.disconnectedAt === 0) { this.disconnectedAt = Date.now(); }
+            showConnectionProblem(this.status, connection);
+            // Keep online user decorations during brief disconnections only
+            if (Date.now() - this.disconnectedAt >= ClientManager.DISCONNECT_GRACE_PERIOD_MS) {
                 Object.keys(this.onlineUsers).forEach(clientId => {
                     this.removePosition(clientId);
                 });
@@ -413,7 +423,8 @@ export class ClientManager {
                 const doc = uri && await this.vfs._resolveUri(uri);
                 const docId = doc?.fileEntity?._id;
                 if (docId) {
-                    this.socket.updatePosition(docId, e.selections[0].active.line, e.selections[0].active.character);
+                    // best effort: a cursor update lost while reconnecting doesn't matter
+                    this.socket.updatePosition(docId, e.selections[0].active.line, e.selections[0].active.character).catch(() => {});
                 }
             }),
             // refresh decorations when editor is switched

@@ -5,8 +5,9 @@ import { BaseAPI, MemberEntity, ProjectSettingsSchema } from '../api/base';
 import { SocketIOAPI, UpdateSchema } from '../api/socketio';
 import { OUTPUT_FOLDER_NAME, ROOT_NAME } from '../consts';
 import { GlobalStateManager } from '../utils/globalStateManager';
-import { ClientManager } from '../collaboration/clientManager';
+import { ClientManager, showConnectionProblem } from '../collaboration/clientManager';
 import { EventBus } from '../utils/eventBus';
+import { log } from '../utils/log';
 import { SCMCollectionProvider } from '../scm/scmCollectionProvider';
 import { ExtendedBaseAPI, ProjectLinkedFileProvider, UrlLinkedFileProvider } from '../api/extendedBase';
 
@@ -34,6 +35,31 @@ export interface DocumentEntity extends FileEntity {
     lastVersion?: number,
     localCache?: string,
     remoteCache?: string,
+    /** Set while one of our own updates is being reconciled with the server (see writeFile). */
+    sync?: {
+        done: Promise<void>,
+        onAck?: (v:number) => void,
+        /** an ack that arrived before `reconcile` started listening */
+        earlyAck?: number,
+        buffered: UpdateSchema[],
+        release: () => void,
+    },
+    /** A write whose emit failed, not known to have reached the server (see submitWrite). */
+    unconfirmed?: PendingWrite,
+}
+
+interface PendingWrite {
+    update: UpdateSchema,
+    /** the content the update turns the server's copy into */
+    mergeRes: string,
+    /** the content written, i.e. what the editor holds */
+    content: string,
+    /** `localCache` before the write */
+    base: string,
+    /** `seq` of the connection current at the first attempt (see VirtualFileSystem.connections) */
+    firstConnection?: number,
+    /** already sent again after the server applied nothing (see reconcile) */
+    resubmitted?: boolean,
 }
 
 export interface FileRefEntity extends FileEntity {
@@ -113,15 +139,42 @@ export class VirtualFileSystem extends vscode.Disposable {
     private api: BaseAPI;
     private socket: SocketIOAPI;
     private publicId?: string;
+    /** this client's recent connections, numbered in the order they were accepted */
+    private connections: {publicId: string, seq: number}[] = [];
+    /** settles once a connection is accepted again, while the socket is disconnected */
+    private reconnected?: {promise: Promise<void>, resolve: () => void};
+    /** How long to wait for the server's ack of our own update before re-reading the doc. */
+    static ownUpdateAckTimeoutMs = 5000;
     private userId: string;
     private isDirty: boolean = true;
     private initializing?: Promise<ProjectEntity>;
     private retryConnection: number = 0;
     private retryTimer?: NodeJS.Timeout;
-    /** Whether a "Reconnecting..." notification is currently shown */
-    private reconnectingNotification: boolean = false;
     /** Timestamp of last disconnect for debounce */
     private lastDisconnectTime: number = 0;
+    /** Once the quick retries have failed: one more attempt every `backgroundReconnectMs`,
+     *  `backgroundReconnectAttempts` times, before giving up until the user picks Retry. */
+    static backgroundReconnectMs = 30000;
+    static backgroundReconnectAttempts = 5;
+    private backgroundRetryTimer?: NodeJS.Timeout;
+    /** slow attempts made since the quick retries failed */
+    private backgroundAttempts: number = 0;
+    /** the running attempt is a slow one: no backoff, and its failure ends the round */
+    private singleAttempt: boolean = false;
+    /** Whether the "Connection lost" notification is on screen */
+    private connectionLostOpen: boolean = false;
+    /** The quick retries failed and no reconnect has succeeded since. Meanwhile only the
+     *  background timer, Retry and a reload start attempts, not file access. */
+    private offline: boolean = false;
+    /** All automatic attempts failed; waiting for Retry or Reload. */
+    private gaveUp: boolean = false;
+    /** attempts to join the project since it was last joined (or since Retry) */
+    private attemptCount: number = 0;
+    /** shown by the collaboration status item: joined, reconnecting by itself, or gave up */
+    private connectionState: 'connected'|'reconnecting'|'offline' = 'connected';
+    private connectionStatusDetail?: string;
+    /** shows the connection state before the first join, when there is no collaboration item yet */
+    private connectionStatusItem?: vscode.StatusBarItem;
     /** Whether event handlers have been registered on the current socket */
     private handlersRegistered: boolean = false;
     private outputBuildId?: string;
@@ -146,6 +199,10 @@ export class VirtualFileSystem extends vscode.Disposable {
             // dispose all triggers of scmCollection
             this.scmCollectionItem?.triggers.forEach((trigger) => trigger.dispose());
             this.scmCollectionItem = undefined;
+            if (this.backgroundRetryTimer) { clearTimeout(this.backgroundRetryTimer); }
+            this.backgroundRetryTimer = undefined;
+            this.connectionStatusItem?.dispose();
+            this.connectionStatusItem = undefined;
             // disconnect socketio
             // this.socket.disconnect();
         });
@@ -177,78 +234,161 @@ export class VirtualFileSystem extends vscode.Disposable {
             return Promise.resolve(this.root);
         }
 
-        if (!this.initializing) {
-            this.initializing = this.initializingPromise;
+        if (this.initializing) {
+            return this.initializing;
         }
-        return this.initializing;
+        if (this.offline) {
+            // VS Code reads, stats and saves files all the time. If each of those started
+            // a round, the rounds would run back to back, the 30 s attempts would never
+            // run and "Connection lost" would never come (seen in a 20-minute outage).
+            return Promise.reject(new Error( vscode.l10n.t('Not connected to {serverName}', {serverName:this.serverName}) ));
+        }
+        return this.startJoining();
+    }
+
+    /** Show "Connection lost" with Reload and Retry, unless it is on screen already. */
+    private showConnectionLost() {
+        if (this.connectionLostOpen) { return; }
+        this.connectionLostOpen = true;
+        Promise.resolve(vscode.window.showErrorMessage(
+            vscode.l10n.t('Connection lost: {serverName}', {serverName:this.serverName}),
+            vscode.l10n.t('Reload'),
+            vscode.l10n.t('Retry'),
+        )).then((choice) => {
+            this.connectionLostOpen = false;
+            if (choice === vscode.l10n.t('Reload')) {
+                vscode.commands.executeCommand("workbench.action.reloadWindow");
+            } else if (choice === vscode.l10n.t('Retry')) {
+                this.retryNow();
+            }
+        });
+    }
+
+    /** The red collaboration status item was clicked: offer Retry and Reload. */
+    onConnectionStatusClicked() {
+        if (this.gaveUp && !this.root && !this.initializing) {
+            this.showConnectionLost();
+        }
+    }
+
+    /** The real connection state (the project is joined, not only the socket connected),
+     *  for the collaboration status item. `attempt` counts attempts since the last join. */
+    get connectionStatus() {
+        return {state: this.connectionState, attempt: this.attemptCount, detail: this.connectionStatusDetail};
+    }
+
+    private updateConnectionStatus(state: 'connected'|'reconnecting'|'offline', detail?: string) {
+        this.connectionState = state;
+        this.connectionStatusDetail = detail;
+        // The collaboration item shows the state once the project was joined. Before
+        // that (e.g. the window was opened offline) it does not exist: use our own item.
+        if (state !== 'connected' && !this.clientManagerItem) {
+            if (!this.connectionStatusItem) {
+                this.connectionStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+            }
+            showConnectionProblem(this.connectionStatusItem, this.connectionStatus);
+            this.connectionStatusItem.show();
+        } else {
+            this.connectionStatusItem?.dispose();
+            this.connectionStatusItem = undefined;
+        }
+    }
+
+    /** The user chose Retry: start over with a full cycle of automatic attempts. */
+    private retryNow() {
+        if (this.root || this.initializing) { return; }
+        log('info', 'reconnect: Retry chosen');
+        if (this.backgroundRetryTimer) { clearTimeout(this.backgroundRetryTimer); }
+        this.backgroundRetryTimer = undefined;
+        this.offline = false;
+        this.gaveUp = false;
+        this.attemptCount = 0;
+        this.backgroundAttempts = 0;
+        this.singleAttempt = false;
+        this.retryConnection = 0;
+        // init() re-attaches all registered handlers to the new socket
+        this.socket.init();
+        this.startJoining().catch(() => {});
+    }
+
+    /** Start a round of attempts to (re)join the project and make it the one init() waits for. */
+    private startJoining(): Promise<ProjectEntity> {
+        const round = this.initializingPromise;
+        this.initializing = round;
+        // A failed round must not linger: init() would hand it out again, and the
+        // background reconnect would take it for a round that is still running.
+        round.catch(() => {
+            if (this.initializing===round) { this.initializing = undefined; }
+        });
+        return round;
     }
 
     private get initializingPromise(): Promise<ProjectEntity> {
         const MAX_RETRIES = 5;
         const BASE_DELAY_MS = 1000; // 1 second base delay
 
-        // if retry connection exhausted, show error
+        // a round of attempts has failed
         if (this.retryConnection >= MAX_RETRIES) {
             this.retryConnection = 0;
             this.initializing = undefined;
-            this.reconnectingNotification = false;
-            vscode.window.showErrorMessage(
-                vscode.l10n.t('Connection lost: {serverName}', {serverName:this.serverName}),
-                vscode.l10n.t('Reload'),
-                vscode.l10n.t('Retry'),
-            ).then((choice) => {
-                if (choice === vscode.l10n.t('Reload')) {
-                    vscode.commands.executeCommand("workbench.action.reloadWindow");
-                } else if (choice === vscode.l10n.t('Retry')) {
-                    this.retryConnection = 0;
-                    this.handlersRegistered = false;
-                    this.socket.init(); // Recreate socket after all auto-reconnect attempts exhausted
-                    this.initializing = this.initializingPromise;
-                    this.init().catch(() => {});
-                }
-            });
-            throw new Error( vscode.l10n.t('Connection lost') );
+            this.offline = true;
+            const {backgroundReconnectMs, backgroundReconnectAttempts} = VirtualFileSystem;
+            if (this.backgroundAttempts < backgroundReconnectAttempts) {
+                // An outage easily outlasts the quick retries; keep trying for a while
+                // (the status bar stays yellow meanwhile).
+                const seconds = backgroundReconnectMs/1000;
+                log('warn', `reconnect: failed; next attempt in ${seconds} s ` +
+                            `(${this.backgroundAttempts+1} of ${backgroundReconnectAttempts})`);
+                this.updateConnectionStatus('reconnecting',
+                    vscode.l10n.t('Next attempt in {seconds} s.', {seconds}));
+                this.scheduleBackgroundReconnect();
+            } else {
+                // Give up until the user picks Retry or Reload, in the notification or,
+                // once it is closed, by clicking the red status item.
+                this.backgroundAttempts = 0;
+                this.gaveUp = true;
+                log('warn', 'reconnect: giving up; waiting for Retry or Reload');
+                this.updateConnectionStatus('offline');
+                this.showConnectionLost();
+            }
+            // rejected promise, not a throw: timer callbacks call this getter directly
+            return Promise.reject(new Error( vscode.l10n.t('Connection lost') ));
         }
 
-        // exponential backoff delay: 1s, 2s, 4s, 8s, 16s
-        const delayMs = this.retryConnection > 0 ? Math.min(BASE_DELAY_MS * Math.pow(2, this.retryConnection - 1), 16000) : 0;
-
-        // Show reconnecting notification on first retry
-        if (this.retryConnection === 1 && !this.reconnectingNotification) {
-            this.reconnectingNotification = true;
-            vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: vscode.l10n.t('Reconnecting to {serverName}...', {serverName:this.serverName}),
-                cancellable: false,
-            }, async () => {
-                // Keep the notification visible while reconnecting
-                await new Promise<void>((resolve) => {
-                    const check = () => {
-                        if (this.root || this.retryConnection >= MAX_RETRIES) {
-                            this.reconnectingNotification = false;
-                            resolve();
-                        } else {
-                            setTimeout(check, 500);
-                        }
-                    };
-                    check();
-                });
-            });
-        }
+        // exponential backoff delay: 1s, 2s, 4s, 8s, 16s (none for a slow attempt: it was timed already)
+        const delayMs = this.retryConnection > 0 && !this.singleAttempt ? Math.min(BASE_DELAY_MS * Math.pow(2, this.retryConnection - 1), 16000) : 0;
 
         // Wait for backoff delay before retrying
         const attemptReconnect = async (): Promise<ProjectEntity> => {
             if (delayMs > 0) {
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
+            this.attemptCount += 1;
+            this.updateConnectionStatus('reconnecting');
 
             // Only recreate the socket when the connection scheme has changed
             // (e.g., v1→v2 after connectionRejected). For transient disconnects,
             // socket.io's built-in auto-reconnect handles re-establishing the TCP
             // connection without creating a new one — avoiding TCP RST packets.
             if (this.socket.needsReinit) {
+                // init() re-attaches all registered handlers to the new socket, so they
+                // must not be registered again (that would apply remote edits twice).
+                log('info', 'reconnect: connection scheme changed, creating a new socket');
                 this.socket.init();
-                this.handlersRegistered = false;
+            } else if (this.socket.isDead) {
+                // The server closed the connection (or auto-reconnect gave up), and
+                // socket.io 0.9 will not reconnect it. Without a new socket, joinProject
+                // and every later write are buffered on the dead one and time out.
+                // init() re-attaches the registered handlers, so remoteWatch() must not
+                // run again here (that would register every handler twice).
+                log('info', 'reconnect: socket is closed for good, creating a new one');
+                this.socket.init();
+            } else if ((this.retryConnection > 1 || this.singleAttempt) && !this.socket.isConnected) {
+                // A rejoin on this socket already failed and socket.io has still not brought
+                // it back. Its own retries back off to 16 s and then run the whole cycle
+                // again, so after a longer outage it can take minutes; start over instead.
+                log('info', 'reconnect: socket still down after a failed rejoin, creating a new one');
+                this.socket.init();
             }
 
             // Register event handlers once on the current socket
@@ -258,14 +398,28 @@ export class VirtualFileSystem extends vscode.Disposable {
             }
 
             this.root = undefined;
+            log('info', `reconnect: joining project (attempt ${this.retryConnection})`);
             return this.socket.joinProject(this.projectId).then(async (project) => {
-                // Reset retry counter on success
-                this.retryConnection = 0;
-                this.reconnectingNotification = false;
                 // fetch project settings
                 const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
-                project.settings = (await this.api.getProjectSettings(identity, this.projectId)).settings!;
+                const settingsRes = await this.api.getProjectSettings(identity, this.projectId);
+                if (settingsRes.type!=='success' || !settingsRes.settings) {
+                    // Most likely still offline. Do not take this for a working connection:
+                    // that stops all further reconnect attempts, and every save then times
+                    // out on a socket that is not connected (until the window is reloaded).
+                    throw new Error(`could not load the project settings: ${settingsRes.message ?? 'no settings in the response'}`);
+                }
+                project.settings = settingsRes.settings;
+                // Reset retry counters on success
+                this.retryConnection = 0;
+                this.backgroundAttempts = 0;
+                this.singleAttempt = false;
+                this.offline = false;
+                this.gaveUp = false;
+                this.attemptCount = 0;
                 this.root = project;
+                log('info', 'reconnect: project joined');
+                this.updateConnectionStatus('connected');
                 const activeCondition = (vscode.workspace.workspaceFolders===undefined) || (vscode.workspace.workspaceFolders?.[0].uri.scheme!==ROOT_NAME) || (vscode.workspace.workspaceFolders?.[0].uri===this.origin);
                 // Register: [collaboration] ClientManager on Statusbar
                 if (activeCondition) {
@@ -292,15 +446,54 @@ export class VirtualFileSystem extends vscode.Disposable {
                     };
                 }
                 // trigger the first compile
-                vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`);
+                // Without saving: after an outage the editors may hold anything (half-done
+                // edits, or an empty document after a revert while offline). Saving them
+                // here would upload that unasked; unsaved edits wait for the user's Ctrl+S.
+                vscode.commands.executeCommand(`${ROOT_NAME}.compileManager.compile`, {save: false});
                 return project;
             }).catch((err) => {
-                this.retryConnection += 1;
+                log('warn', `reconnect: attempt failed: ${err?.message ?? err}`);
+                if (this.singleAttempt) {
+                    // a slow attempt is a round of its own
+                    this.singleAttempt = false;
+                    this.retryConnection = MAX_RETRIES;
+                } else {
+                    this.retryConnection += 1;
+                }
                 return this.initializingPromise;
             });
         };
 
         return attemptReconnect();
+    }
+
+    /** Make one more (slow) attempt later, unless one is already planned. */
+    private scheduleBackgroundReconnect() {
+        if (this.backgroundRetryTimer) { return; }
+        this.backgroundRetryTimer = setTimeout(() => {
+            this.backgroundRetryTimer = undefined;
+            // reconnected meanwhile, or a round is already running (it plans the next one)
+            if (this.root || this.initializing) { return; }
+            this.backgroundAttempts += 1;
+            this.singleAttempt = true;
+            log('info', `reconnect: slow attempt ${this.backgroundAttempts} of ${VirtualFileSystem.backgroundReconnectAttempts}`);
+            this.startJoining();
+        }, VirtualFileSystem.backgroundReconnectMs);
+    }
+
+    /** Rejoin the project shortly, replacing any rejoin already scheduled. */
+    private scheduleRejoin() {
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+        }
+        // Delay reconnection attempt slightly to allow transient issues to resolve
+        this.retryTimer = setTimeout(() => {
+            this.retryTimer = undefined;
+            this.singleAttempt = false;
+            this.retryConnection += 1;
+            // failures are handled by whoever awaits init(); startJoining() catches the rest
+            this.startJoining();
+        }, 1000);
     }
 
     get isInvisibleMode() {
@@ -310,7 +503,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     toggleInvisibleMode() {
         // Clear disconnect debounce to prevent false retry trigger during mode switch
         this.lastDisconnectTime = 0;
-        this.handlersRegistered = false; // Will re-register on the new socket scheme
+        // (no need to re-register handlers: socket.init() re-attaches them to the new socket)
         if (this.retryTimer) {
             clearTimeout(this.retryTimer);
             this.retryTimer = undefined;
@@ -439,34 +632,45 @@ export class VirtualFileSystem extends vscode.Disposable {
     private remoteWatch(): void {
         this.socket.updateEventHandlers({
             onDisconnected: () => {
+                if (!this.reconnected) {
+                    let resolve!: () => void;
+                    const promise = new Promise<void>((r) => { resolve = r; });
+                    this.reconnected = {promise, resolve};
+                }
                 if (this.root===undefined) { return; } // bypass the first initialization
-                console.log("Disconnected");
-                // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
+                log('warn', 'project: disconnected, rejoining');
+                this.updateConnectionStatus('reconnecting');
+                // Debounce rapid disconnect cycles (within 2 seconds), but only while a
+                // reconnect is already scheduled; otherwise the disconnect would be
+                // dropped and nothing would ever rejoin the project.
                 const now = Date.now();
-                if (now - this.lastDisconnectTime < 2000) {
-                    console.log("Disconnected: debounced (too soon since last disconnect)");
+                if (now - this.lastDisconnectTime < 2000 && this.retryTimer !== undefined) {
+                    log('info', 'project: disconnect debounced (rejoin already scheduled)');
                     return;
                 }
                 this.lastDisconnectTime = now;
-                // Clear any pending retry timer
-                if (this.retryTimer) {
-                    clearTimeout(this.retryTimer);
-                }
-                // Delay reconnection attempt slightly to allow transient issues to resolve
-                this.retryTimer = setTimeout(() => {
-                    this.retryConnection += 1;
-                    this.initializing = this.initializingPromise;
-                }, 1000);
+                this.scheduleRejoin();
+            },
+            onReconnectFailed: () => {
+                // socket.io gave up on this socket. If the project still counts as joined,
+                // rejoin it, which replaces the dead socket (isDead). Otherwise a rejoin is
+                // running or scheduled already and will see the dead socket itself.
+                if (this.root===undefined || this.retryTimer!==undefined) { return; }
+                log('warn', 'project: socket.io gave up reconnecting, rejoining on a new socket');
+                this.scheduleRejoin();
             },
             onConnectionAccepted: (publicId:string) => {
                 this.retryConnection = 0;
-                this.reconnectingNotification = false;
                 this.lastDisconnectTime = 0;
-                if (this.retryTimer) {
-                    clearTimeout(this.retryTimer);
-                    this.retryTimer = undefined;
-                }
+                // Do NOT cancel a pending rejoin here. A socket.io reconnect is a new
+                // client on the server, and it is not in the project until joinProject
+                // is sent again. Cancelling the rejoin left the client connected but
+                // not joined, so writes were rejected and the server closed it again.
                 this.publicId = publicId;
+                this.connections.push({publicId, seq: (this.connections[this.connections.length-1]?.seq ?? 0) + 1});
+                this.connections.splice(0, this.connections.length - 20);
+                this.reconnected?.resolve();
+                this.reconnected = undefined;
             },
             onFileCreated: (parentFolderId:string, type:FileType, entity:FileEntity) => {
                 const res = this._resolveById(parentFolderId);
@@ -519,32 +723,20 @@ export class VirtualFileSystem extends vscode.Disposable {
                 if (res===undefined) { return; }
 
                 const doc = res.fileEntity as DocumentEntity;
-                if (update.v===doc.version) {
-                    doc.version += 1;
-                    if (update.op && doc.remoteCache!==undefined) {
-                        let content = doc.remoteCache;
-                        update.op.forEach((op) => {
-                            if (op.i) {
-                                content = content.slice(0, op.p) + op.i + content.slice(op.p);
-                            } else if (op.d) {
-                                const deleteUtf8 = Buffer.from(op.d, 'ascii').toString('utf-8');
-                                content = content.slice(0, op.p) + content.slice(op.p+deleteUtf8.length);
-                            }
-                        });
-                        const _uri = this.pathToUri(res.path).toString();
-                        const _doc = vscode.workspace.textDocuments.find((doc) => doc.uri.toString()===_uri);
-                        // if doc dirty, local cache should diverge from remote cache
-                        if (_doc && !_doc.isDirty) {doc.localCache = content;}
-                        doc.remoteCache = content;
-                        this.isDirty = true;
-                        this.notify([
-                            {type: vscode.FileChangeType.Changed, uri: this.pathToUri(res.path)}
-                        ]);
+                // While one of our own updates is being reconciled (see writeFile), hand
+                // its ack over and hold remote ops back until the caches are settled.
+                if (doc.sync) {
+                    if (update.op===undefined) {
+                        if (doc.sync.onAck) { doc.sync.onAck(update.v); } else { doc.sync.earlyAck = update.v; }
+                    } else {
+                        doc.sync.buffered.push(update);
                     }
-                } else {
-                    doc.remoteCache = undefined;
-                    doc.localCache = undefined;
+                    return;
                 }
+                // An update without `op` is the ack of one of our own updates that has
+                // already been reconciled: nothing left to do.
+                if (update.op===undefined) { return; }
+                this.applyRemoteUpdate(res.path, doc, update);
             },
             onSpellCheckLanguageUpdated: (language:string) => {
                 if (this.root) {
@@ -566,6 +758,40 @@ export class VirtualFileSystem extends vscode.Disposable {
                 // }
             },
         });
+    }
+
+    /** Apply a remote op for `doc` in order; resync lazily when one was missed. */
+    private applyRemoteUpdate(path: string, doc: DocumentEntity, update: UpdateSchema) {
+        if (doc.version===undefined || doc.remoteCache===undefined) { return; }
+        // already part of the content we hold, e.g. fetched by a re-join
+        if (update.v<doc.version) { return; }
+        if (update.v>doc.version) {
+            // an op was missed: drop the server-side copy but keep `localCache`, the
+            // content the editor is based on, so the next write can still 3-way merge
+            doc.remoteCache = undefined;
+            this.notify([
+                {type: vscode.FileChangeType.Changed, uri: this.pathToUri(path)}
+            ]);
+            return;
+        }
+        doc.version += 1;
+        let content = doc.remoteCache;
+        update.op?.forEach((op) => {
+            if (op.i) {
+                content = content.slice(0, op.p) + op.i + content.slice(op.p);
+            } else if (op.d) {
+                const deleteUtf8 = Buffer.from(op.d, 'ascii').toString('utf-8');
+                content = content.slice(0, op.p) + content.slice(op.p+deleteUtf8.length);
+            }
+        });
+        // `localCache` is not advanced here but when the editor actually reloads the doc
+        // (see openFile): if the user types before that, the reload is skipped and the
+        // next write must still merge this op in rather than overwrite it.
+        doc.remoteCache = content;
+        this.isDirty = true;
+        this.notify([
+            {type: vscode.FileChangeType.Changed, uri: this.pathToUri(path)}
+        ]);
     }
 
     pathToUri(...path: string[]): vscode.Uri {
@@ -616,6 +842,9 @@ export class VirtualFileSystem extends vscode.Disposable {
             const doc = fileEntity as DocumentEntity;
             if (doc.remoteCache!==undefined) {
                 const content = doc.remoteCache;
+                // the editor is about to show this content, so it is the base of its next write
+                const _doc = vscode.workspace.textDocuments.find((d) => d.uri.toString()===uri.toString());
+                if (!_doc || !_doc.isDirty) { doc.localCache = content; }
                 EventBus.fire('fileWillOpenEvent', {uri});
                 return new TextEncoder().encode(content);
             } else {
@@ -836,18 +1065,28 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (fileType && fileType==='doc' && fileEntity) {
             const doc = fileEntity as DocumentEntity;
             const _content = new TextDecoder().decode(content);
-            if (doc.version===undefined || doc.localCache===undefined || doc.remoteCache===undefined) {
-                return;
+            // one write per doc at a time: wait until the previous one is reconciled
+            await this.syncSettled(doc);
+            if (doc.unconfirmed) {
+                // An earlier write failed without us knowing whether it reached the server.
+                // Settle it first, so its edit is neither lost nor applied twice.
+                await this.submitWrite(uri, doc, doc.unconfirmed);
+                await this.syncSettled(doc);
+            }
+            if (doc.version===undefined || doc.remoteCache===undefined) {
+                // never read, or dropped after a missed op: fetch the server's copy
+                // instead of silently skipping the write
+                await this.resyncDoc(doc);
             }
             const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(doc.localCache,  doc.remoteCache);
+            const patches = dmp.patch_make(doc.localCache!,  doc.remoteCache!);
 
             const mergeResArray = dmp.patch_apply(patches, _content);
             const mergeRes = mergeResArray[0] as string;
             const update = {
                 doc: doc._id,
                 lastV: doc.lastVersion,
-                v: doc.version,
+                v: doc.version!,
                 // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
                 hash: (()=>{
                     if (!doc.mtime || Date.now()-doc.mtime>5000) {
@@ -858,7 +1097,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                     }
                 })() as string,
                 op: (()=>{
-                    const remoteCacheAscii = Buffer.from(doc.remoteCache, 'utf-8').toString('utf-8');
+                    const remoteCacheAscii = Buffer.from(doc.remoteCache!, 'utf-8').toString('utf-8');
                     const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
                     let currentPos = 0;
                     return dmp.diff_main(remoteCacheAscii, mergeResAscii)
@@ -878,17 +1117,165 @@ export class VirtualFileSystem extends vscode.Disposable {
                                 .filter(x => x) as any;
                 })(),
             };
-            this.isDirty = (update.op && update.op.length) ? true : false;
-            await this.socket.applyOtUpdate(doc._id, update);
-            doc.localCache = mergeRes;
-            doc.remoteCache = mergeRes;
+            this.isDirty = update.op.length>0;
+            if (update.op.length===0) {
+                // nothing to send: the server already holds this content
+                doc.localCache = _content;
+                doc.remoteCache = mergeRes;
+                setTimeout(() => {
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri: uri}
+                    ]);
+                }, 10);
+                return;
+            }
+            await this.submitWrite(uri, doc, {update, mergeRes, content: _content, base: doc.localCache!});
+        }
+    }
+
+    /**
+     * Send one write and, once the server has taken it, hand it to `reconcile`.
+     *
+     * Should the emit fail, the very same update is sent again with `dupIfSource` listing
+     * the connections it was sent over: if an earlier attempt did reach the server after
+     * all (e.g. only the ack was lost to a reconnect), the server then acknowledges it
+     * instead of applying it twice. A write that still fails is kept in `doc.unconfirmed`
+     * and settled the same way before the next write of the doc.
+     */
+    private async submitWrite(uri: vscode.Uri, doc: DocumentEntity, write: PendingWrite) {
+        let lastError: any;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            // Do not let socket.io buffer the update for a connection whose publicId we may
+            // never learn (should it drop again before accepting us): dupIfSource could not
+            // name it. Wait for the connection to be accepted, as the web client does.
+            if (this.reconnected) {
+                await Promise.race([this.reconnected.promise, new Promise(r => setTimeout(r, 15000))]);
+            }
+            write.firstConnection ??= this.connections[this.connections.length-1]?.seq ?? 0;
+            const resend = attempt>0 || doc.unconfirmed===write;
+            // The connection current at the first attempt, or -- as socket.io buffers an emit
+            // made while reconnecting -- any connection accepted since, may have carried it.
+            const sentOver = this.connections.filter(c => c.seq>=write.firstConnection!).map(c => c.publicId);
+            const update = resend ? {...write.update, dupIfSource: sentOver} : write.update;
+            const sync = this.beginSync(doc);
+            try {
+                await this.socket.applyOtUpdate(doc._id, update);
+            } catch (err:any) {
+                log('warn', `write: ${uri.path} (attempt ${attempt+1}, ` +
+                            `socket ${this.socket.isConnected ? 'connected' : 'NOT connected'}) failed: ${err?.message ?? err}`);
+                lastError = err;
+                this.endSync(doc, sync);
+                continue;
+            }
+            doc.unconfirmed = undefined;
+            // `localCache` is what the editor holds: the written content. `mergeRes` may also
+            // carry ops from others merged in, which the editor only shows once it reloads.
+            doc.localCache = write.content;
+            doc.remoteCache = write.mergeRes;
             setTimeout(() => {
                 this.notify([
                     {type: vscode.FileChangeType.Changed, uri: uri}
                 ]);
             }, 10);
-            doc.lastVersion = doc.version;                
+            if (this.socket.isUsingAlternativeConnectionScheme) {
+                // this scheme sends no ack: the callback is all there is
+                doc.lastVersion = write.update.v;
+                doc.version = write.update.v + 1;
+                this.endSync(doc, sync);
+            } else {
+                this.reconcile(uri, doc, sync, write);
+            }
+            return;
         }
+        doc.unconfirmed = write;
+        throw lastError;
+    }
+
+    /**
+     * Settle `doc` after the server took `write`, whose update was based on version `v`.
+     *
+     * The emit callback only means the update was queued. Once it is applied, the server
+     * sends the author an op-less `otUpdateApplied {v'}`, `v'` being the version it was
+     * applied at: after any op from others applied first, which reaches us before the ack.
+     * No ack arrives at all while this client is not in the doc's room, e.g. after a
+     * reconnect that did not re-join the doc; every later write would then be submitted
+     * at a stale version.
+     */
+    private async reconcile(uri: vscode.Uri, doc: DocumentEntity, sync: NonNullable<DocumentEntity['sync']>,
+                            write: PendingWrite) {
+        const baseVersion = write.update.v;
+        let resubmit = false;
+        const ackVersion = sync.earlyAck ?? await new Promise<number|undefined>((resolve) => {
+            const timer = setTimeout(() => resolve(undefined), VirtualFileSystem.ownUpdateAckTimeoutMs);
+            sync.onAck = (v:number) => { clearTimeout(timer); resolve(v); };
+        });
+        sync.onAck = undefined;
+        try {
+            if (ackVersion===baseVersion) {
+                // applied as sent: our content is exactly the server's
+                doc.lastVersion = baseVersion;
+                doc.version = baseVersion + 1;
+            } else {
+                // Ops from others went first and ours was transformed against them, or there
+                // was no ack. Read the doc back; joining it also puts us back in its room.
+                await this.resyncDoc(doc);
+                if (ackVersion===undefined && doc.version===baseVersion) {
+                    // Nothing was applied, e.g. the server rejected the update. Keep the old
+                    // base, so a later write still carries this edit, and do not reload the
+                    // editor over it; send it once more (dupIfSource guards against a late one).
+                    doc.localCache = write.base;
+                    if (!write.resubmitted) {
+                        write.resubmitted = true;
+                        doc.unconfirmed = write;
+                        resubmit = true;
+                    }
+                } else {
+                    this.notify([
+                        {type: vscode.FileChangeType.Changed, uri: uri}
+                    ]);
+                }
+            }
+        } catch {
+            doc.remoteCache = undefined; // re-read on the next read or write
+        }
+        this.endSync(doc, sync);
+        if (resubmit && doc.unconfirmed===write && !doc.sync) {
+            this.submitWrite(uri, doc, write).catch(() => {});
+        }
+    }
+
+    private async syncSettled(doc: DocumentEntity) {
+        while (doc.sync) { await doc.sync.done; }
+    }
+
+    private beginSync(doc: DocumentEntity) {
+        let release!: () => void;
+        const done = new Promise<void>((resolve) => { release = resolve; });
+        const sync = {done, release, buffered: [] as UpdateSchema[]};
+        doc.sync = sync;
+        return sync;
+    }
+
+    /** Finish a sync: apply the remote ops held back meanwhile and let the next write go. */
+    private endSync(doc: DocumentEntity, sync: NonNullable<DocumentEntity['sync']>) {
+        if (doc.sync!==sync) { return; }
+        doc.sync = undefined;
+        const res = this._resolveById(doc._id);
+        if (res) {
+            sync.buffered.forEach((update) => this.applyRemoteUpdate(res.path, doc, update));
+        }
+        sync.release();
+    }
+
+    /** Fetch the server's copy of `doc`. `localCache` is kept: it is what the editor is based on. */
+    private async resyncDoc(doc: DocumentEntity) {
+        const res = await this.socket.joinDoc(doc._id);
+        const content = res.docLines.join('\n');
+        doc.version = res.version;
+        doc.lastVersion = res.version;
+        doc.remoteCache = content;
+        if (doc.localCache===undefined) { doc.localCache = content; }
+        doc.mtime = undefined;
     }
 
     async mkdir(uri: vscode.Uri) {
@@ -1100,7 +1487,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
         const res = await this.api.spellingControllerLearn(identity, this.userId, word);
         if (res.type==='success') {
-            this.root?.settings.learnedWords.push(word);
+            this.root?.settings?.learnedWords.push(word);
             return true;
         } else {
             return false;
@@ -1111,9 +1498,9 @@ export class VirtualFileSystem extends vscode.Disposable {
         const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
         const res = await this.api.spellingControllerUnlearn(identity, word);
         if (res.type==='success') {
-            const index = this.root?.settings.learnedWords.findIndex((w) => w===word);
+            const index = this.root?.settings?.learnedWords.findIndex((w) => w===word);
             if (index!==undefined && index>=0) {
-                this.root?.settings.learnedWords.splice(index, 1);
+                this.root?.settings?.learnedWords.splice(index, 1);
             }
             return true;
         } else {
@@ -1126,26 +1513,27 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (language==='') {
             return {name:'Off', code:''};
         } else {
-            return this.root?.settings.languages.find(item => item.code===language);
+            return this.root?.settings?.languages?.find(item => item.code===language);
         }
     }
 
+    // `settings` is missing until a (re)join has fetched them, so it is optional below.
     getAllSpellCheckLanguages() {
-        return this.root?.settings.languages;
+        return this.root?.settings?.languages;
     }
 
     getCompiler() {
         const compiler = this.root?.compiler;
-        const compilerItem = this.root?.settings.compilers.find(item => item.code===compiler);
+        const compilerItem = this.root?.settings?.compilers?.find(item => item.code===compiler);
         return compilerItem;
     }
 
     getAllCompilers() {
-        return this.root?.settings.compilers;
+        return this.root?.settings?.compilers;
     }
 
     getDictionary() {
-        return this.root?.settings.learnedWords;
+        return this.root?.settings?.learnedWords;
     }
 
     getRootDocName() {
@@ -1394,6 +1782,13 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
             }),
             vscode.commands.registerCommand('remoteFileSystem.prefetch', (uri: vscode.Uri) => {
                 return this.prefetch(uri);
+            }),
+            // the red connection status item: offer Retry and Reload
+            vscode.commands.registerCommand(`${ROOT_NAME}.remoteFileSystem.reconnect`, (uri?: vscode.Uri) => {
+                uri = uri || vscode.workspace.workspaceFolders?.[0].uri;
+                if (uri?.scheme === ROOT_NAME) {
+                    return this.prefetch(uri).then((vfs) => vfs.onConnectionStatusClicked());
+                }
             }),
         ];
     }

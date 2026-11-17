@@ -3,9 +3,25 @@ import { Identity, BaseAPI, ProjectMessageResponseSchema } from './base';
 import { FileEntity, DocumentEntity, FileRefEntity, FileType, FolderEntity, ProjectEntity } from '../core/remoteFileSystemProvider';
 import { EventBus } from '../utils/eventBus';
 import { SocketIOAlt } from './socketioAlt';
+import { log } from '../utils/log';
 
 function decodePackedUtf8(text: string): string {
     return Buffer.from(text, 'latin1').toString('utf-8');
+}
+
+/** How long to wait for a server acknowledgement before giving up on an emit. */
+const EMIT_TIMEOUT_MS = 15000;
+
+/** Render a socket.io error payload as something readable instead of `[object Object]`. */
+function stringifyError(err: any): string {
+    if (err === null || err === undefined) { return 'unknown error'; }
+    if (typeof err === 'string') { return err; }
+    if (err.message) { return err.message; }
+    try {
+        return JSON.stringify(err);
+    } catch {
+        return String(err);
+    }
 }
 
 export interface UpdateUserSchema {
@@ -46,6 +62,7 @@ export interface UpdateSchema {
     v: number, //doc version number
     lastV?: number, //last version number
     hash?: string, //(not needed if lastV is provided)
+    dupIfSource?: string[], //publicIds an earlier submission of this update may have come from
     meta?: {
         source: string, //socketio client id
         ts: number, //unix timestamp
@@ -61,6 +78,8 @@ export interface EventsHandler {
     onFileChanged?: (update:UpdateSchema) => void,
     //
     onDisconnected?: () => void,
+    /** socket.io gave up reconnecting: the socket is dead and must be replaced */
+    onReconnectFailed?: () => void,
     onConnectionAccepted?: (publicId:string) => void,
     onClientUpdated?: (user:UpdateUserSchema) => void,
     onClientDisconnected?: (id:string) => void,
@@ -77,6 +96,8 @@ type ConnectionScheme = 'Alt' | 'v1' | 'v2';
 export class SocketIOAPI {
     private scheme: ConnectionScheme = 'v1';
     private record?: Promise<ProjectEntity>;
+    /** settles `record` with the next joinProjectResponse (v2), while one is awaited */
+    private recordResolve?: (project:ProjectEntity) => void;
     private _handlers: Array<EventsHandler> = [];
     /** Track EventBus listeners for cleanup to prevent MaxListenersExceededWarning */
     private _eventBusCleanups: Array<()=>void> = [];
@@ -125,25 +146,34 @@ export class SocketIOAPI {
                 break;
             case 'v1':
                 this.record = undefined;
+                this.recordResolve = undefined;
                 this.socket = this.api._initSocketV0(this.identity);
                 break;
             case 'v2':
                 this.record = undefined;
+                this.recordResolve = undefined;
                 const query = `?projectId=${this.projectId}&t=${Date.now()}`;
                 this.socket = this.api._initSocketV0(this.identity, query);
                 break;
         }
         // create emit
         (this.socket.emit)[require('util').promisify.custom] = (event:string, ...args:any[]) => {
+            // Bind the call to the socket it is emitted on: init() may swap this.socket
+            // out from under an in-flight call, and that call can never be acknowledged.
+            const socket = this.socket;
+            let timer: NodeJS.Timeout;
             const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
-                    reject('timeout');
-                }, 5000);
+                timer = setTimeout(() => {
+                    reject(new Error(`'${event}' timed out after ${EMIT_TIMEOUT_MS}ms`));
+                }, EMIT_TIMEOUT_MS);
             });
             const waitPromise = new Promise((resolve, reject) => {
-                this.socket.emit(event, ...args, (err:any, ...data:any[]) => {
+                socket.emit(event, ...args, (err:any, ...data:any[]) => {
+                    // Clear the timer as soon as the ack lands, otherwise every single
+                    // emit leaks a live timer for the whole timeout window.
+                    clearTimeout(timer);
                     if (err) {
-                        reject(err);
+                        reject(err instanceof Error ? err : new Error(`'${event}' rejected: ${stringifyError(err)}`));
                     } else {
                         resolve(data);
                     }
@@ -165,6 +195,45 @@ export class SocketIOAPI {
         return this._socketInitScheme !== this.scheme || !this.socket;
     }
 
+    /**
+     * True when the socket.io connection is down and will not come back on its own.
+     *
+     * socket.io-client 0.9 only auto-reconnects after a transport failure. When the
+     * *server* closes the connection (reason "booted") it stays down for good, and
+     * Overleaf's real-time service does exactly that after rejecting an update
+     * (`otUpdateError` followed by `client.disconnect()`) and on other server-side
+     * errors. Auto-reconnect also gives up after 'max reconnection attempts'.
+     * Anything emitted on such a socket is buffered forever and only ever times out.
+     */
+    get isDead(): boolean {
+        if (this.socket instanceof SocketIOAlt) { return false; }
+        const io = this.socket?.socket;
+        if (!io) { return true; }
+        return !io.connected && !io.connecting && !io.reconnecting;
+    }
+
+    /** True while the socket.io connection is up (the Alt scheme has no socket to lose). */
+    get isConnected(): boolean {
+        if (this.socket instanceof SocketIOAlt) { return true; }
+        return this.socket?.socket?.connected === true;
+    }
+
+    /** Make `record` wait for the next joinProjectResponse, unless it already does. */
+    private awaitFreshRecord() {
+        if (this.recordResolve) { return; }
+        this.record = new Promise(resolve => { this.recordResolve = resolve; });
+    }
+
+    private settleRecord(project:ProjectEntity) {
+        const resolve = this.recordResolve;
+        this.recordResolve = undefined;
+        if (resolve) {
+            resolve(project);
+        } else {
+            this.record = Promise.resolve(project);
+        }
+    }
+
     /** Clean up any accumulated EventBus listeners */
     private _cleanupEventBusListeners() {
         for (const cleanup of this._eventBusCleanups) {
@@ -175,19 +244,35 @@ export class SocketIOAPI {
 
     private initInternalHandlers() {
         this.socket.on('connect', () => {
-            console.log('SocketIOAPI: connected');
+            log('info', `socket: connected (${this.scheme})`);
         });
         this.socket.on('connect_failed', () => {
-            console.log('SocketIOAPI: connect_failed');
+            log('warn', 'socket: connect_failed');
+        });
+        this.socket.on('disconnect', (reason:any) => {
+            // "booted" = closed by the server; socket.io 0.9 will not reconnect by itself
+            log('warn', `socket: disconnected (${stringifyError(reason)})`);
+            // v2: the next connection is joined anew and gets its own joinProjectResponse;
+            // until then the project record of this one is stale.
+            if (this.scheme==='v2') { this.awaitFreshRecord(); }
+        });
+        this.socket.on('reconnecting', (delay:number, attempt:number) => {
+            log('info', `socket: auto-reconnect attempt ${attempt} in ${delay} ms`);
+        });
+        this.socket.on('reconnect', () => {
+            log('info', 'socket: auto-reconnected');
+        });
+        this.socket.on('reconnect_failed', () => {
+            log('warn', 'socket: reconnect_failed (auto-reconnect gave up)');
         });
         this.socket.on('forceDisconnect', (message:string, delay=10) => {
-            console.log('SocketIOAPI: forceDisconnect', message);
+            log('warn', `socket: forceDisconnect ${stringifyError(message)}`);
         });
         this.socket.on('connectionRejected', (err:any) => {
-            console.log('SocketIOAPI: connectionRejected.', err?.message || err);
+            log('warn', `socket: connectionRejected ${stringifyError(err)}`);
             // If v2 also gets rejected, fall back to v1 rather than staying stuck
             if (this.scheme === 'v2') {
-                console.log('SocketIOAPI: v2 rejected, falling back to v1');
+                log('info', 'socket: v2 rejected, falling back to v1');
                 this.scheme = 'v1';
             }
             // Disable auto-reconnect on this socket: the server explicitly rejected
@@ -199,17 +284,28 @@ export class SocketIOAPI {
         });
         this.socket.on('error', (err:any) => {
             // Log error instead of throwing to avoid crashing the extension
-            console.error('SocketIOAPI: socket error', err?.message || err);
+            log('error', `socket: error ${stringifyError(err)}`);
+        });
+        // The server reports a rejected document update on its own channel and sends no
+        // ack for the emit, so without this the real reason (stale version, hash
+        // mismatch, lost session) is invisible and surfaces only as a generic timeout.
+        this.socket.on('otUpdateError', (err:any, update?:any) => {
+            log('error', `socket: otUpdateError ${stringifyError(err)}` +
+                         (update!==undefined ? ` ${stringifyError(update)}` : ''));
         });
 
         if (this.scheme==='v2') {
-            this.record = new Promise(resolve => {
-                this.socket.on('joinProjectResponse', (res:any) => {
-                    const publicId = res.publicId as string;
-                    const project = res.project as ProjectEntity;
-                    EventBus.fire('socketioConnectedEvent', {publicId});
-                    resolve(project);
-                });
+            // The server joins every v2 connection -- including socket.io's own reconnects
+            // of this socket -- to the project and answers with a joinProjectResponse.
+            // Keep the latest one: joinProject() hands it out, and an older one describes
+            // a connection that is gone.
+            this.awaitFreshRecord();
+            this.socket.on('joinProjectResponse', (res:any) => {
+                const publicId = res.publicId as string;
+                const project = res.project as ProjectEntity;
+                log('info', `socket: joined project (v2, connection ${publicId})`);
+                EventBus.fire('socketioConnectedEvent', {publicId});
+                this.settleRecord(project);
             });
         }
     }
@@ -231,6 +327,7 @@ export class SocketIOAPI {
         if (updatedRecord) {
             this.url = url;
             this.record = Promise.resolve(updatedRecord);
+            this.recordResolve = undefined;
         }
     }
 
@@ -278,6 +375,11 @@ export class SocketIOAPI {
                     break;
                 case handlers.onDisconnected:
                     this.socket.on('disconnect', () => {
+                        handler();
+                    });
+                    break;
+                case handlers.onReconnectFailed:
+                    this.socket.on('reconnect_failed', () => {
                         handler();
                     });
                     break;
@@ -408,6 +510,16 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async applyOtUpdate(docId:string, update:UpdateSchema) {
+        // An update that carries no ops is a no-op — there is nothing for the
+        // server to apply. The alternative connection scheme (SocketIOAlt)
+        // already short-circuits these; the realtime socket must too. Recent
+        // overleaf.com real-time validation rejects an empty-op update outright
+        // (`'applyOtUpdate' rejected: Invalid input`) and then disconnects the
+        // client, after which every following write fails until the window is
+        // reloaded. The genuine Overleaf client never emits an empty op either.
+        if (!update.op?.length) {
+            return;
+        }
         return this.emit('applyOtUpdate', docId, update)
             .then(() => {
                 return;
