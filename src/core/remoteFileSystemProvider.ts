@@ -232,7 +232,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                     vscode.commands.executeCommand("workbench.action.reloadWindow");
                 } else if (choice === vscode.l10n.t('Retry')) {
                     this.retryConnection = 0;
-                    this.handlersRegistered = false;
+                    // init() re-attaches all registered handlers to the new socket
                     this.socket.init(); // Recreate socket after all auto-reconnect attempts exhausted
                     this.initializing = this.initializingPromise;
                     this.init().catch(() => {});
@@ -278,8 +278,17 @@ export class VirtualFileSystem extends vscode.Disposable {
             // socket.io's built-in auto-reconnect handles re-establishing the TCP
             // connection without creating a new one — avoiding TCP RST packets.
             if (this.socket.needsReinit) {
+                // init() re-attaches all registered handlers to the new socket, so they
+                // must not be registered again (that would apply remote edits twice).
                 this.socket.init();
-                this.handlersRegistered = false;
+            } else if (this.socket.isDead) {
+                // The server closed the connection (or auto-reconnect gave up), and
+                // socket.io 0.9 will not reconnect it. Without a new socket, joinProject
+                // and every later write are buffered on the dead one and time out.
+                // init() re-attaches the registered handlers, so remoteWatch() must not
+                // run again here (that would register every handler twice).
+                console.log('Reconnecting: socket closed by server, creating a new one');
+                this.socket.init();
             }
 
             // Register event handlers once on the current socket
@@ -341,7 +350,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     toggleInvisibleMode() {
         // Clear disconnect debounce to prevent false retry trigger during mode switch
         this.lastDisconnectTime = 0;
-        this.handlersRegistered = false; // Will re-register on the new socket scheme
+        // (no need to re-register handlers: socket.init() re-attaches them to the new socket)
         if (this.retryTimer) {
             clearTimeout(this.retryTimer);
             this.retryTimer = undefined;
@@ -477,10 +486,12 @@ export class VirtualFileSystem extends vscode.Disposable {
                 }
                 if (this.root===undefined) { return; } // bypass the first initialization
                 console.log("Disconnected");
-                // Debounce: ignore rapid disconnect/reconnect cycles (within 2 seconds)
+                // Debounce rapid disconnect cycles (within 2 seconds), but only while a
+                // reconnect is already scheduled; otherwise the disconnect would be
+                // dropped and nothing would ever rejoin the project.
                 const now = Date.now();
-                if (now - this.lastDisconnectTime < 2000) {
-                    console.log("Disconnected: debounced (too soon since last disconnect)");
+                if (now - this.lastDisconnectTime < 2000 && this.retryTimer !== undefined) {
+                    console.log("Disconnected: debounced (reconnect already scheduled)");
                     return;
                 }
                 this.lastDisconnectTime = now;
@@ -490,18 +501,22 @@ export class VirtualFileSystem extends vscode.Disposable {
                 }
                 // Delay reconnection attempt slightly to allow transient issues to resolve
                 this.retryTimer = setTimeout(() => {
+                    this.retryTimer = undefined;
                     this.retryConnection += 1;
                     this.initializing = this.initializingPromise;
+                    // Callers of init() handle failures themselves; don't let a failed
+                    // background reconnect surface as an unhandled rejection.
+                    this.initializing.catch(() => {});
                 }, 1000);
             },
             onConnectionAccepted: (publicId:string) => {
                 this.retryConnection = 0;
                 this.reconnectingNotification = false;
                 this.lastDisconnectTime = 0;
-                if (this.retryTimer) {
-                    clearTimeout(this.retryTimer);
-                    this.retryTimer = undefined;
-                }
+                // Do NOT cancel a pending rejoin here. A socket.io reconnect is a new
+                // client on the server, and it is not in the project until joinProject
+                // is sent again. Cancelling the rejoin left the client connected but
+                // not joined, so writes were rejected and the server closed it again.
                 this.publicId = publicId;
                 this.connections.push({publicId, seq: (this.connections[this.connections.length-1]?.seq ?? 0) + 1});
                 this.connections.splice(0, this.connections.length - 20);

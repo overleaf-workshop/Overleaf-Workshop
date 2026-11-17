@@ -104,7 +104,7 @@ export class ClientManager {
                     this.updatePosition(user.client_id, onlineUser.doc_id, onlineUser.row, onlineUser.column, onlineUser);
                 }
             });
-        });
+        }).catch(() => {}); // best effort: the collaborator list is refreshed by later events
 
         this.chatViewer = new ChatViewProvider(this.vfs, this.publicId, this.context.extensionUri, this.socket);
         this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
@@ -413,7 +413,8 @@ export class ClientManager {
                 const doc = uri && await this.vfs._resolveUri(uri);
                 const docId = doc?.fileEntity?._id;
                 if (docId) {
-                    this.socket.updatePosition(docId, e.selections[0].active.line, e.selections[0].active.character);
+                    // best effort: a cursor update lost while reconnecting doesn't matter
+                    this.socket.updatePosition(docId, e.selections[0].active.line, e.selections[0].active.character).catch(() => {});
                 }
             }),
             // refresh decorations when editor is switched

@@ -188,6 +188,23 @@ export class SocketIOAPI {
         return this._socketInitScheme !== this.scheme || !this.socket;
     }
 
+    /**
+     * True when the socket.io connection is down and will not come back on its own.
+     *
+     * socket.io-client 0.9 only auto-reconnects after a transport failure. When the
+     * *server* closes the connection (reason "booted") it stays down for good, and
+     * Overleaf's real-time service does exactly that after rejecting an update
+     * (`otUpdateError` followed by `client.disconnect()`) and on other server-side
+     * errors. Auto-reconnect also gives up after 'max reconnection attempts'.
+     * Anything emitted on such a socket is buffered forever and only ever times out.
+     */
+    get isDead(): boolean {
+        if (this.socket instanceof SocketIOAlt) { return false; }
+        const io = this.socket?.socket;
+        if (!io) { return true; }
+        return !io.connected && !io.connecting && !io.reconnecting;
+    }
+
     /** Clean up any accumulated EventBus listeners */
     private _cleanupEventBusListeners() {
         for (const cleanup of this._eventBusCleanups) {
@@ -202,6 +219,13 @@ export class SocketIOAPI {
         });
         this.socket.on('connect_failed', () => {
             console.log('SocketIOAPI: connect_failed');
+        });
+        this.socket.on('disconnect', (reason:any) => {
+            // "booted" = closed by the server; socket.io 0.9 will not reconnect by itself
+            console.log('SocketIOAPI: disconnected', reason);
+        });
+        this.socket.on('reconnect_failed', () => {
+            console.log('SocketIOAPI: reconnect_failed (auto-reconnect gave up)');
         });
         this.socket.on('forceDisconnect', (message:string, delay=10) => {
             console.log('SocketIOAPI: forceDisconnect', message);
