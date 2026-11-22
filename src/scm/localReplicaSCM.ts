@@ -371,7 +371,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
             new vscode.RelativePattern( this.vfs.origin, '**/*' )
         );
         this.localWatcher = vscode.workspace.createFileSystemWatcher(
-            new vscode.RelativePattern( this.baseUri.path, '**/*' )
+            new vscode.RelativePattern( this.baseUri, '**/*' )
         );
         await this.overwrite();
 

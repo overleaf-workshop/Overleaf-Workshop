@@ -126,7 +126,9 @@ export class SCMCollectionProvider extends vscode.Disposable {
             const scmProto = supportedSCMs.find(scm => scm.label===scmPersist.label);
             if (scmProto!==undefined) {
                 const enabled = scmPersist.enabled ?? true;
-                const baseUri = vscode.Uri.parse(scmPersist.baseUri);
+                const baseUri = scmPersist.baseUri.startsWith('file:')
+                    ? vscode.Uri.parse(scmPersist.baseUri)
+                    : vscode.Uri.file(scmPersist.baseUri);
                 await this.createSCM(scmProto, baseUri, false, enabled);
             }
         });
