@@ -202,10 +202,37 @@ export class CompileManager {
         if (uri) {
             this.vfsm.prefetch(uri)
                 .then(async (vfs) => {
-                    const content = new TextDecoder().decode( await vfs?.openFile(uri) );
-                    const match = RegExp(documentClassRegex).exec(content);
-                    const fileId = (await vfs._resolveUri(uri)).fileId;
-                    const rootDocId = match ? fileId : undefined;
+                    let rootDocId: string | undefined = undefined;
+                    try {
+                        let targetUri = uri;
+                        let resolved = await vfs._resolveUri(targetUri);
+                        if (resolved.fileType !== 'doc' && vscode.window.activeTextEditor) {
+                            const activeUri = vscode.window.activeTextEditor.document.uri;
+                            if (activeUri.scheme === ROOT_NAME) {
+                                targetUri = activeUri;
+                                resolved = await vfs._resolveUri(targetUri);
+                            } else {
+                                const relPath = await LocalReplicaSCMProvider.uriToPath(activeUri);
+                                if (relPath) {
+                                    const activeVfsUri = vfs.pathToUri(relPath);
+                                    const activeResolved = await vfs._resolveUri(activeVfsUri);
+                                    if (activeResolved.fileType === 'doc') {
+                                        targetUri = activeVfsUri;
+                                        resolved = activeResolved;
+                                    }
+                                }
+                            }
+                        }
+                        if (resolved.fileType === 'doc') {
+                            const content = new TextDecoder().decode(await vfs.openFile(targetUri));
+                            const match = RegExp(documentClassRegex).exec(content);
+                            if (match) {
+                                rootDocId = resolved.fileId;
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Root document detection fallback:', e);
+                    }
                     return await vfs.compile(force, this.compileAsDraft, this.compileStopOnFirstError, rootDocId);
                 })
                 .then(async (res) => {
